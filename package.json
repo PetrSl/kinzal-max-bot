@@ -1,6 +1,6 @@
 {
   "name": "kinzal-max-bot",
-  "version": "1.0.0",
+  "version": "0.2.5",
   "main": "max-bot.js",
   "scripts": {
     "start": "node max-bot.js"
