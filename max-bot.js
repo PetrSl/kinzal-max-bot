@@ -9,7 +9,7 @@ app.use(express.json());
 
 app.get('/', (req, res) => res.send('KinZal MAX Bot is running'));
 
-// Функция получения занятых дат (аналогична VK)
+// Г”ГіГ­ГЄГ¶ГЁГї ГЇГ®Г«ГіГ·ГҐГ­ГЁГї Г§Г Г­ГїГІГ»Гµ Г¤Г ГІ (Г Г­Г Г«Г®ГЈГЁГ·Г­Г  VK)
 async function getBusyDates() {
   if (process.env.ICAL_URL) {
     try {
@@ -35,7 +35,7 @@ async function getBusyDates() {
       }
       return Array.from(busyDates).sort();
     } catch (e) {
-      console.error('Ошибка iCal:', e);
+      console.error('ГЋГёГЁГЎГЄГ  iCal:', e);
       return [];
     }
   } else {
@@ -43,22 +43,22 @@ async function getBusyDates() {
   }
 }
 
-// Инициализация MAX бота (только если есть токен)
+// Г€Г­ГЁГ¶ГЁГ Г«ГЁГ§Г Г¶ГЁГї MAX ГЎГ®ГІГ  (ГІГ®Г«ГјГЄГ® ГҐГ±Г«ГЁ ГҐГ±ГІГј ГІГ®ГЄГҐГ­)
 if (process.env.BOT_TOKEN) {
   const bot = new Bot(process.env.BOT_TOKEN);
 
-  // Команда /start
+  // ГЉГ®Г¬Г Г­Г¤Г  /start
   bot.command('start', (ctx) => {
-    ctx.reply('Привет! Я бот Кинозала 4K. Напишите "Даты" для проверки занятости, или "Хочу [дата]" для брони.');
+    ctx.reply('ГЏГ°ГЁГўГҐГІ! Гџ ГЎГ®ГІ ГЉГЁГ­Г®Г§Г Г«Г  4K. ГЌГ ГЇГЁГёГЁГІГҐ "Г„Г ГІГ»" Г¤Г«Гї ГЇГ°Г®ГўГҐГ°ГЄГЁ Г§Г Г­ГїГІГ®Г±ГІГЁ, ГЁГ«ГЁ "Г•Г®Г·Гі [Г¤Г ГІГ ]" Г¤Г«Гї ГЎГ°Г®Г­ГЁ.');
   });
 
-  // Обработка текстовых команд
-  bot.hears(/^(даты|свободные даты|занятость)$/i, async (ctx) => {
+  // ГЋГЎГ°Г ГЎГ®ГІГЄГ  ГІГҐГЄГ±ГІГ®ГўГ»Гµ ГЄГ®Г¬Г Г­Г¤
+  bot.hears(/^(Г¤Г ГІГ»|Г±ГўГ®ГЎГ®Г¤Г­Г»ГҐ Г¤Г ГІГ»|Г§Г Г­ГїГІГ®Г±ГІГј)$/i, async (ctx) => {
     const busy = await getBusyDates();
     if (busy.length === 0) {
-      ctx.reply('Пока нет данных о занятости. Попробуйте позже.');
+      ctx.reply('ГЏГ®ГЄГ  Г­ГҐГІ Г¤Г Г­Г­Г»Гµ Г® Г§Г Г­ГїГІГ®Г±ГІГЁ. ГЏГ®ГЇГ°Г®ГЎГіГ©ГІГҐ ГЇГ®Г§Г¦ГҐ.');
     } else {
-      let responseText = '?? *Кинозал 4K: занятость на 30 дней*\n\n';
+      let responseText = '?? *ГЉГЁГ­Г®Г§Г Г« 4K: Г§Г Г­ГїГІГ®Г±ГІГј Г­Г  30 Г¤Г­ГҐГ©*\n\n';
       const today = new Date();
       for (let i = 0; i < 30; i++) {
         const d = new Date(today);
@@ -69,39 +69,39 @@ if (process.env.BOT_TOKEN) {
         const month = (d.getMonth() + 1).toString().padStart(2, '0');
         responseText += `${isBusy ? '?' : '?'} ${day}.${month}\n`;
       }
-      responseText += '\nЧтобы забронировать, напишите "Хочу [дата]" и я передам хозяину.';
+      responseText += '\nГ—ГІГ®ГЎГ» Г§Г ГЎГ°Г®Г­ГЁГ°Г®ГўГ ГІГј, Г­Г ГЇГЁГёГЁГІГҐ "Г•Г®Г·Гі [Г¤Г ГІГ ]" ГЁ Гї ГЇГҐГ°ГҐГ¤Г Г¬ ГµГ®Г§ГїГЁГ­Гі.';
       ctx.reply(responseText, { format: 'markdown' });
     }
   });
 
-  // Заявка "Хочу [дата]"
-  bot.hears(/^хочу\s+(.+)$/i, async (ctx) => {
-    const userId = ctx.message.from.id; // или как в MAX API
+  // Г‡Г ГїГўГЄГ  "Г•Г®Г·Гі [Г¤Г ГІГ ]"
+  bot.hears(/^ГµГ®Г·Гі\s+(.+)$/i, async (ctx) => {
+    const userId = ctx.message.from.id; // ГЁГ«ГЁ ГЄГ ГЄ Гў MAX API
     const ownerId = process.env.OWNER_ID;
     if (ownerId) {
       try {
-        await bot.api.sendMessageToUser(ownerId, `?? Новая заявка от пользователя (id: ${userId}): ${ctx.message.text}`);
+        await bot.api.sendMessageToUser(ownerId, `?? ГЌГ®ГўГ Гї Г§Г ГїГўГЄГ  Г®ГІ ГЇГ®Г«ГјГ§Г®ГўГ ГІГҐГ«Гї (id: ${userId}): ${ctx.message.text}`);
       } catch (err) {
-        console.error('Ошибка отправки владельцу:', err);
+        console.error('ГЋГёГЁГЎГЄГ  Г®ГІГЇГ°Г ГўГЄГЁ ГўГ«Г Г¤ГҐГ«ГјГ¶Гі:', err);
       }
     }
-    ctx.reply('Спасибо! Я передал запрос хозяину, он скоро свяжется с вами.');
+    ctx.reply('Г‘ГЇГ Г±ГЁГЎГ®! Гџ ГЇГҐГ°ГҐГ¤Г Г« Г§Г ГЇГ°Г®Г± ГµГ®Г§ГїГЁГ­Гі, Г®Г­ Г±ГЄГ®Г°Г® Г±ГўГїГ¦ГҐГІГ±Гї Г± ГўГ Г¬ГЁ.');
   });
 
-  // Обработка любых других сообщений
+  // ГЋГЎГ°Г ГЎГ®ГІГЄГ  Г«ГѕГЎГ»Гµ Г¤Г°ГіГЈГЁГµ Г±Г®Г®ГЎГ№ГҐГ­ГЁГ©
   bot.on('message_created', (ctx) => {
-    ctx.reply('Привет! Я бот Кинозала 4K. Напишите "Даты" для проверки занятости, или "Хочу [дата]" для брони.');
+    ctx.reply('ГЏГ°ГЁГўГҐГІ! Гџ ГЎГ®ГІ ГЉГЁГ­Г®Г§Г Г«Г  4K. ГЌГ ГЇГЁГёГЁГІГҐ "Г„Г ГІГ»" Г¤Г«Гї ГЇГ°Г®ГўГҐГ°ГЄГЁ Г§Г Г­ГїГІГ®Г±ГІГЁ, ГЁГ«ГЁ "Г•Г®Г·Гі [Г¤Г ГІГ ]" Г¤Г«Гї ГЎГ°Г®Г­ГЁ.');
   });
 
-  // Запуск long polling
+  // Г‡Г ГЇГіГ±ГЄ long polling
   bot.start().catch(err => {
-    console.error('Ошибка запуска MAX бота:', err);
+    console.error('ГЋГёГЁГЎГЄГ  Г§Г ГЇГіГ±ГЄГ  MAX ГЎГ®ГІГ :', err);
   });
 } else {
-  console.log('BOT_TOKEN не задан, MAX бот не запущен');
+  console.log('BOT_TOKEN Г­ГҐ Г§Г Г¤Г Г­, MAX ГЎГ®ГІ Г­ГҐ Г§Г ГЇГіГ№ГҐГ­');
 }
 
-// HTTP сервер для Render (чтобы сервис не падал)
+// HTTP Г±ГҐГ°ГўГҐГ° Г¤Г«Гї Render (Г·ГІГ®ГЎГ» Г±ГҐГ°ГўГЁГ± Г­ГҐ ГЇГ Г¤Г Г«)
 app.listen(process.env.PORT || 3000, () => {
   console.log('KinZal MAX Bot server started');
 });
