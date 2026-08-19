@@ -73,7 +73,8 @@ if (process.env.BOT_TOKEN) {
   });
 
   bot.hears(/^хочу\s+(.+)$/i, async (ctx) => {
-    const userId = ctx.message.from.id; // или как в MAX API
+    // Исправлено: правильное получение ID пользователя
+    const userId = ctx.message.sender.user_id;
     const ownerId = process.env.OWNER_ID;
     if (ownerId) {
       try {
