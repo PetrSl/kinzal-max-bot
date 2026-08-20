@@ -6,13 +6,13 @@ const ical = require('ical');
 const app = express();
 app.use(express.json());
 
+app.get('/', (req, res) => res.send('KinZal MAX Bot is running'));
+
 // Проверка обязательных переменных
 if (!process.env.BOT_TOKEN) {
   console.error('BOT_TOKEN не задан, завершение работы');
   process.exit(1);
 }
-
-app.get('/', (req, res) => res.send('KinZal MAX Bot is running'));
 
 // Функция получения занятых дат
 async function getBusyDates() {
@@ -48,21 +48,18 @@ async function getBusyDates() {
   }
 }
 
-// Функция отправки сообщения (текст + опциональные attachments)
-async function sendMessage(userId, text, attachments = [], useMarkdown = false) {
+// Отправка сообщения с возможными attachments
+async function sendMessage(userId, text, attachments = []) {
   try {
     console.log(`Отправляю сообщение на user_id ${userId}: ${text}`);
-    const payload = {
-      user_id: userId,
-      text: text,
-      attachments: attachments
-    };
-    if (useMarkdown) {
-      payload.format = 'markdown';
-    }
     const response = await axios.post(
       'https://platform-api2.max.ru/messages',
-      payload,
+      {
+        user_id: userId, // если не сработает, заменить на chat_id
+        text: text,
+        attachments: attachments,
+        format: 'markdown'
+      },
       {
         headers: {
           'Authorization': process.env.BOT_TOKEN,
@@ -76,7 +73,30 @@ async function sendMessage(userId, text, attachments = [], useMarkdown = false) 
   }
 }
 
-// Функция создания inline-клавиатуры
+// Функция показа занятости
+async function sendBusyDates(userId) {
+  const busy = await getBusyDates();
+  if (busy.length === 0) {
+    await sendMessage(userId, 'Пока нет данных о занятости. Попробуйте позже.');
+    return;
+  }
+
+  let responseText = '🎬 *Кинозал 4K: занятость на 30 дней*\n\n';
+  const today = new Date();
+  for (let i = 0; i < 30; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + i);
+    const dateStr = d.toISOString().slice(0, 10);
+    const isBusy = busy.includes(dateStr);
+    const day = d.getDate().toString().padStart(2, '0');
+    const month = (d.getMonth() + 1).toString().padStart(2, '0');
+    responseText += `${isBusy ? '❌' : '✅'} ${day}.${month}\n`;
+  }
+  responseText += '\nЧтобы забронировать, напишите "Хочу [дата]" и я передам хозяину.';
+  await sendMessage(userId, responseText);
+}
+
+// Создание inline-клавиатуры
 function getMainKeyboard() {
   return [{
     type: 'inline_keyboard',
@@ -98,29 +118,8 @@ function getMainKeyboard() {
 
 // Отправка приветствия с кнопками
 async function sendWelcome(userId) {
-  await sendMessage(userId, 'Привет! Я бот Кинозала 4K. Выберите действие:', getMainKeyboard());
-}
-
-// Отправка списка занятых дат
-async function sendBusyDates(userId) {
-  const busy = await getBusyDates();
-  if (busy.length === 0) {
-    await sendMessage(userId, 'Пока нет данных о занятости. Попробуйте позже.');
-  } else {
-    let responseText = '🎬 *Кинозал 4K: занятость на 30 дней*\n\n';
-    const today = new Date();
-    for (let i = 0; i < 30; i++) {
-      const d = new Date(today);
-      d.setDate(d.getDate() + i);
-      const dateStr = d.toISOString().slice(0, 10);
-      const isBusy = busy.includes(dateStr);
-      const day = d.getDate().toString().padStart(2, '0');
-      const month = (d.getMonth() + 1).toString().padStart(2, '0');
-      responseText += `${isBusy ? '❌' : '✅'} ${day}.${month}\n`;
-    }
-    responseText += '\nЧтобы забронировать, напишите "Хочу [дата]" и я передам хозяину.';
-    await sendMessage(userId, responseText, [], true); // используем markdown для выделения заголовка
-  }
+  const text = 'Привет! Я бот Кинозала 4K. Выберите действие:';
+  await sendMessage(userId, text, getMainKeyboard());
 }
 
 // Обработка входящего вебхука
@@ -139,19 +138,19 @@ app.post('/callback', async (req, res) => {
     const body = req.body;
     const updateType = body.update_type;
 
-    // Обработка обычных сообщений и bot_started
     if (updateType === 'message_created' || updateType === 'bot_started') {
       let userId;
       let text = '';
 
-      // Извлекаем user_id и текст с проверками
-      if (updateType === 'message_created' && body.message && body.message.sender) {
-        userId = body.message.sender.user_id;
-        if (body.message.body && body.message.body.text) {
-          text = body.message.body.text;
+      if (updateType === 'bot_started') {
+        // Для bot_started используем body.user
+        userId = body.user ? body.user.user_id : null;
+      } else if (updateType === 'message_created' && body.message) {
+        const message = body.message;
+        userId = message.sender ? message.sender.user_id : null;
+        if (message.body && typeof message.body.text === 'string') {
+          text = message.body.text;
         }
-      } else if (updateType === 'bot_started' && body.user) {
-        userId = body.user.user_id;
       }
 
       if (!userId) {
@@ -172,33 +171,21 @@ app.post('/callback', async (req, res) => {
         }
         await sendMessage(userId, 'Спасибо! Я передал запрос хозяину, он скоро свяжется с вами.');
       } else {
-        // Любое другое сообщение — отправляем приветствие с кнопками
         await sendWelcome(userId);
       }
-    }
-    // Обработка нажатий на кнопки (callback)
-    else if (updateType === 'message_callback') {
-      console.log('Получен callback, полная структура:', JSON.stringify(body));
+    } else if (updateType === 'message_callback') {
+      console.log('Получен callback:', JSON.stringify(body));
 
-      // Ищем user_id и payload в разных возможных местах
-      let userId = null;
-      let payload = null;
+      // Определяем user_id и payload (структура может отличаться, проверяем несколько вариантов)
+      let userId = body.user ? body.user.user_id : null;
+      let payload = body.payload;
 
-      if (body.user && body.user.user_id) {
-        userId = body.user.user_id;
-      } else if (body.message && body.message.sender && body.message.sender.user_id) {
-        userId = body.message.sender.user_id;
-      }
-
-      if (body.payload) {
-        payload = body.payload;
-      } else if (body.message && body.message.payload) {
+      // Если payload нет в body.payload, пробуем другие поля
+      if (!payload && body.message && body.message.payload) {
         payload = body.message.payload;
-      } else if (body.callback && body.callback.payload) {
+      } else if (!payload && body.callback && body.callback.payload) {
         payload = body.callback.payload;
       }
-
-      console.log(`Callback: user_id = ${userId}, payload = ${payload}`);
 
       if (!userId) {
         console.error('Не удалось определить user_id из callback');
