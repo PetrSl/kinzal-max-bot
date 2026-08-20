@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const ical = require('ical');
+const { Bot } = require('@maxhub/max-bot-api');
 
 const app = express();
 app.use(express.json());
@@ -13,6 +14,8 @@ if (!process.env.BOT_TOKEN) {
   console.error('BOT_TOKEN не задан, завершение работы');
   process.exit(1);
 }
+
+const bot = new Bot(process.env.BOT_TOKEN);
 
 // Функция получения занятых дат
 async function getBusyDates() {
@@ -48,36 +51,25 @@ async function getBusyDates() {
   }
 }
 
-// Отправка сообщения в чат по chat_id
-async function sendMessage(chatId, text, attachments = []) {
+// Отправка сообщения пользователю через SDK
+async function sendMessage(userId, text, attachments = []) {
   try {
-    console.log(`Отправляю сообщение в chat_id ${chatId}: ${text}`);
-    const response = await axios.post(
-      'https://platform-api2.max.ru/messages',
-      {
-        chat_id: chatId, // исправлено: используем chat_id
-        text: text,
-        attachments: attachments,
-        format: 'markdown'
-      },
-      {
-        headers: {
-          'Authorization': process.env.BOT_TOKEN,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    console.log('Сообщение отправлено, ответ API:', JSON.stringify(response.data));
+    console.log(`Отправляю сообщение пользователю ${userId}: ${text}`);
+    await bot.api.sendMessageToUser(userId, text, {
+      attachments: attachments,
+      format: 'markdown'
+    });
+    console.log('Сообщение отправлено');
   } catch (error) {
-    console.error('Ошибка отправки сообщения:', error.response ? JSON.stringify(error.response.data) : error.message);
+    console.error('Ошибка отправки сообщения:', error);
   }
 }
 
 // Функция показа занятости
-async function sendBusyDates(chatId) {
+async function sendBusyDates(userId) {
   const busy = await getBusyDates();
   if (busy.length === 0) {
-    await sendMessage(chatId, 'Пока нет данных о занятости. Попробуйте позже.');
+    await sendMessage(userId, 'Пока нет данных о занятости. Попробуйте позже.');
     return;
   }
 
@@ -93,7 +85,7 @@ async function sendBusyDates(chatId) {
     responseText += `${isBusy ? '❌' : '✅'} ${day}.${month}\n`;
   }
   responseText += '\nЧтобы забронировать, напишите "Хочу [дата]" и я передам хозяину.';
-  await sendMessage(chatId, responseText);
+  await sendMessage(userId, responseText);
 }
 
 // Создание inline-клавиатуры
@@ -117,9 +109,9 @@ function getMainKeyboard() {
 }
 
 // Отправка приветствия с кнопками
-async function sendWelcome(chatId) {
+async function sendWelcome(userId) {
   const text = 'Привет! Я бот Кинозала 4K. Выберите действие:';
-  await sendMessage(chatId, text, getMainKeyboard());
+  await sendMessage(userId, text, getMainKeyboard());
 }
 
 // Обработка входящего вебхука
@@ -139,47 +131,43 @@ app.post('/callback', async (req, res) => {
     const updateType = body.update_type;
 
     if (updateType === 'message_created' || updateType === 'bot_started') {
-      let chatId;
       let userId;
       let text = '';
 
       if (updateType === 'bot_started') {
-        // Для bot_started используем body.chat_id и body.user
-        chatId = body.chat_id;
         userId = body.user ? body.user.user_id : null;
       } else if (updateType === 'message_created' && body.message) {
         const message = body.message;
-        chatId = message.recipient ? message.recipient.chat_id : null;
         userId = message.sender ? message.sender.user_id : null;
         if (message.body && typeof message.body.text === 'string') {
           text = message.body.text;
         }
       }
 
-      if (!chatId) {
-        console.error('Не удалось определить chat_id из события:', updateType);
+      if (!userId) {
+        console.error('Не удалось определить user_id из события:', updateType);
         return;
       }
 
-      console.log(`Событие: ${updateType}, chat_id: ${chatId}, user_id: ${userId}, текст: "${text}"`);
+      console.log(`Событие: ${updateType}, user_id: ${userId}, текст: "${text}"`);
 
       if (updateType === 'bot_started' || text.startsWith('/start')) {
-        await sendWelcome(chatId);
+        await sendWelcome(userId);
       } else if (/^(даты|свободные даты|занятость)$/i.test(text)) {
-        await sendBusyDates(chatId);
+        await sendBusyDates(userId);
       } else if (/^хочу\s+(.+)$/i.test(text)) {
         const ownerId = process.env.OWNER_ID;
-        // Пока нет chat_id владельца, поэтому просто логируем
-        console.log(`Новая заявка от user_id ${userId}: ${text}`);
-        await sendMessage(chatId, 'Спасибо! Я передал запрос хозяину, он скоро свяжется с вами.');
+        if (ownerId) {
+          await sendMessage(ownerId, `🔔 Новая заявка от пользователя (id: ${userId}): ${text}`);
+        }
+        await sendMessage(userId, 'Спасибо! Я передал запрос хозяину, он скоро свяжется с вами.');
       } else {
-        await sendWelcome(chatId);
+        await sendWelcome(userId);
       }
     } else if (updateType === 'message_callback') {
       console.log('Получен callback:', JSON.stringify(body));
 
-      // Определяем chat_id и payload (структура может отличаться)
-      let chatId = body.chat_id || (body.message && body.message.recipient ? body.message.recipient.chat_id : null);
+      let userId = body.user ? body.user.user_id : null;
       let payload = body.payload;
 
       if (!payload && body.message && body.message.payload) {
@@ -188,17 +176,17 @@ app.post('/callback', async (req, res) => {
         payload = body.callback.payload;
       }
 
-      if (!chatId) {
-        console.error('Не удалось определить chat_id из callback');
+      if (!userId) {
+        console.error('Не удалось определить user_id из callback');
         return;
       }
 
       if (payload === 'free_dates') {
-        await sendBusyDates(chatId);
+        await sendBusyDates(userId);
       } else if (payload === 'book') {
-        await sendMessage(chatId, 'Для бронирования напишите желаемую дату в формате: Хочу 25.12.2024');
+        await sendMessage(userId, 'Для бронирования напишите желаемую дату в формате: Хочу 25.12.2024');
       } else if (payload === 'contact_owner') {
-        await sendMessage(chatId, 'Свяжитесь с хозяином: @petrsl или напишите сюда, я передам.');
+        await sendMessage(userId, 'Свяжитесь с хозяином: @petrsl или напишите сюда, я передам.');
       } else {
         console.log('Неизвестный payload:', payload);
       }
