@@ -6,6 +6,12 @@ const ical = require('ical');
 const app = express();
 app.use(express.json());
 
+// Проверка обязательных переменных
+if (!process.env.BOT_TOKEN) {
+  console.error('BOT_TOKEN не задан, завершение работы');
+  process.exit(1);
+}
+
 app.get('/', (req, res) => res.send('KinZal MAX Bot is running'));
 
 // Функция получения занятых дат
@@ -43,17 +49,20 @@ async function getBusyDates() {
 }
 
 // Функция отправки сообщения (текст + опциональные attachments)
-async function sendMessage(userId, text, attachments = []) {
+async function sendMessage(userId, text, attachments = [], useMarkdown = false) {
   try {
     console.log(`Отправляю сообщение на user_id ${userId}: ${text}`);
+    const payload = {
+      user_id: userId,
+      text: text,
+      attachments: attachments
+    };
+    if (useMarkdown) {
+      payload.format = 'markdown';
+    }
     const response = await axios.post(
       'https://platform-api2.max.ru/messages',
-      {
-        user_id: userId, // используем user_id, если не сработает — заменим на chat_id
-        text: text,
-        attachments: attachments,
-        format: 'markdown'
-      },
+      payload,
       {
         headers: {
           'Authorization': process.env.BOT_TOKEN,
@@ -67,7 +76,7 @@ async function sendMessage(userId, text, attachments = []) {
   }
 }
 
-// Функция создания inline-клавиатуры в формате MAX
+// Функция создания inline-клавиатуры
 function getMainKeyboard() {
   return [{
     type: 'inline_keyboard',
@@ -89,8 +98,29 @@ function getMainKeyboard() {
 
 // Отправка приветствия с кнопками
 async function sendWelcome(userId) {
-  const text = 'Привет! Я бот Кинозала 4K. Выберите действие:';
-  await sendMessage(userId, text, getMainKeyboard());
+  await sendMessage(userId, 'Привет! Я бот Кинозала 4K. Выберите действие:', getMainKeyboard());
+}
+
+// Отправка списка занятых дат
+async function sendBusyDates(userId) {
+  const busy = await getBusyDates();
+  if (busy.length === 0) {
+    await sendMessage(userId, 'Пока нет данных о занятости. Попробуйте позже.');
+  } else {
+    let responseText = '🎬 *Кинозал 4K: занятость на 30 дней*\n\n';
+    const today = new Date();
+    for (let i = 0; i < 30; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() + i);
+      const dateStr = d.toISOString().slice(0, 10);
+      const isBusy = busy.includes(dateStr);
+      const day = d.getDate().toString().padStart(2, '0');
+      const month = (d.getMonth() + 1).toString().padStart(2, '0');
+      responseText += `${isBusy ? '❌' : '✅'} ${day}.${month}\n`;
+    }
+    responseText += '\nЧтобы забронировать, напишите "Хочу [дата]" и я передам хозяину.';
+    await sendMessage(userId, responseText, [], true); // используем markdown для выделения заголовка
+  }
 }
 
 // Обработка входящего вебхука
@@ -114,15 +144,14 @@ app.post('/callback', async (req, res) => {
       let userId;
       let text = '';
 
-      if (body.message) {
-        // message_created
+      // Извлекаем user_id и текст с проверками
+      if (updateType === 'message_created' && body.message && body.message.sender) {
         userId = body.message.sender.user_id;
         if (body.message.body && body.message.body.text) {
           text = body.message.body.text;
         }
-      } else if (body.sender) {
-        // bot_started может содержать sender
-        userId = body.sender.user_id;
+      } else if (updateType === 'bot_started' && body.user) {
+        userId = body.user.user_id;
       }
 
       if (!userId) {
@@ -132,50 +161,44 @@ app.post('/callback', async (req, res) => {
 
       console.log(`Событие: ${updateType}, user_id: ${userId}, текст: "${text}"`);
 
-      // Команда /start или bot_started
       if (updateType === 'bot_started' || text.startsWith('/start')) {
         await sendWelcome(userId);
-      }
-      // Команда "Даты"
-      else if (/^(даты|свободные даты|занятость)$/i.test(text)) {
-        const busy = await getBusyDates();
-        if (busy.length === 0) {
-          await sendMessage(userId, 'Пока нет данных о занятости. Попробуйте позже.');
-        } else {
-          let responseText = '🎬 *Кинозал 4K: занятость на 30 дней*\n\n';
-          const today = new Date();
-          for (let i = 0; i < 30; i++) {
-            const d = new Date(today);
-            d.setDate(d.getDate() + i);
-            const dateStr = d.toISOString().slice(0, 10);
-            const isBusy = busy.includes(dateStr);
-            const day = d.getDate().toString().padStart(2, '0');
-            const month = (d.getMonth() + 1).toString().padStart(2, '0');
-            responseText += `${isBusy ? '❌' : '✅'} ${day}.${month}\n`;
-          }
-          responseText += '\nЧтобы забронировать, напишите "Хочу [дата]" и я передам хозяину.';
-          await sendMessage(userId, responseText);
-        }
-      }
-      // Команда "Хочу ..."
-      else if (/^хочу\s+(.+)$/i.test(text)) {
+      } else if (/^(даты|свободные даты|занятость)$/i.test(text)) {
+        await sendBusyDates(userId);
+      } else if (/^хочу\s+(.+)$/i.test(text)) {
         const ownerId = process.env.OWNER_ID;
         if (ownerId) {
           await sendMessage(ownerId, `🔔 Новая заявка от пользователя (id: ${userId}): ${text}`);
         }
         await sendMessage(userId, 'Спасибо! Я передал запрос хозяину, он скоро свяжется с вами.');
-      }
-      // Любое другое сообщение
-      else {
+      } else {
+        // Любое другое сообщение — отправляем приветствие с кнопками
         await sendWelcome(userId);
       }
     }
     // Обработка нажатий на кнопки (callback)
     else if (updateType === 'message_callback') {
-      console.log('Получен callback:', JSON.stringify(body));
-      // Определяем user_id и payload
-      let userId = body.user ? body.user.user_id : null;
-      let payload = body.payload;
+      console.log('Получен callback, полная структура:', JSON.stringify(body));
+
+      // Ищем user_id и payload в разных возможных местах
+      let userId = null;
+      let payload = null;
+
+      if (body.user && body.user.user_id) {
+        userId = body.user.user_id;
+      } else if (body.message && body.message.sender && body.message.sender.user_id) {
+        userId = body.message.sender.user_id;
+      }
+
+      if (body.payload) {
+        payload = body.payload;
+      } else if (body.message && body.message.payload) {
+        payload = body.message.payload;
+      } else if (body.callback && body.callback.payload) {
+        payload = body.callback.payload;
+      }
+
+      console.log(`Callback: user_id = ${userId}, payload = ${payload}`);
 
       if (!userId) {
         console.error('Не удалось определить user_id из callback');
@@ -183,24 +206,7 @@ app.post('/callback', async (req, res) => {
       }
 
       if (payload === 'free_dates') {
-        const busy = await getBusyDates();
-        if (busy.length === 0) {
-          await sendMessage(userId, 'Пока нет данных о занятости. Попробуйте позже.');
-        } else {
-          let responseText = '🎬 *Кинозал 4K: занятость на 30 дней*\n\n';
-          const today = new Date();
-          for (let i = 0; i < 30; i++) {
-            const d = new Date(today);
-            d.setDate(d.getDate() + i);
-            const dateStr = d.toISOString().slice(0, 10);
-            const isBusy = busy.includes(dateStr);
-            const day = d.getDate().toString().padStart(2, '0');
-            const month = (d.getMonth() + 1).toString().padStart(2, '0');
-            responseText += `${isBusy ? '❌' : '✅'} ${day}.${month}\n`;
-          }
-          responseText += '\nЧтобы забронировать, напишите "Хочу [дата]" и я передам хозяину.';
-          await sendMessage(userId, responseText);
-        }
+        await sendBusyDates(userId);
       } else if (payload === 'book') {
         await sendMessage(userId, 'Для бронирования напишите желаемую дату в формате: Хочу 25.12.2024');
       } else if (payload === 'contact_owner') {
