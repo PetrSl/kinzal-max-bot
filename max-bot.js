@@ -47,18 +47,28 @@ async function getBusyDates() {
 if (process.env.BOT_TOKEN) {
   const bot = new Bot(process.env.BOT_TOKEN);
 
-  // Команда /start с кнопками
-  bot.command('start', async (ctx) => {
+  // Функция отправки приветственного сообщения с кнопками
+  async function sendWelcome(ctx) {
     const keyboard = Keyboard.inlineKeyboard([
       [Keyboard.callbackButton('📅 Свободные даты', 'free_dates')],
       [Keyboard.callbackButton('📝 Забронировать', 'book')],
       [Keyboard.callbackButton('📞 Связаться с хозяином', 'contact_owner')]
     ]);
 
-    await ctx.reply('Привет! Я бот Кинозала 4K. Выберите действие:', {
-      attachments: [keyboard]
-    });
-  });
+    try {
+      await ctx.reply('Привет! Я бот Кинозала 4K. Выберите действие:', {
+        attachments: [keyboard]
+      });
+    } catch (error) {
+      console.error('Ошибка отправки приветствия:', error);
+    }
+  }
+
+  // Обработка команды /start
+  bot.command('start', sendWelcome);
+
+  // Обработка события bot_started (нажатие кнопки "Start")
+  bot.on('bot_started', sendWelcome);
 
   // Обработка нажатий на кнопки
   bot.action('free_dates', async (ctx) => {
@@ -128,12 +138,15 @@ if (process.env.BOT_TOKEN) {
     ctx.reply('Спасибо! Я передал запрос хозяину, он скоро свяжется с вами.');
   });
 
+  // Общий обработчик для любых сообщений (на случай, если другие не сработали)
   bot.on('message_created', (ctx) => {
     ctx.reply('Привет! Я бот Кинозала 4K. Напишите "Даты" для проверки занятости, или "Хочу [дата]" для брони.');
   });
 
   // Обработка входящего вебхука
   app.post('/callback', (req, res) => {
+    console.log('Webhook received:', JSON.stringify(req.body)); // для отладки
+
     const secret = req.headers['x-max-bot-api-secret'];
     if (process.env.WEBHOOK_SECRET && secret !== process.env.WEBHOOK_SECRET) {
       console.error('Неверный секрет webhook');
