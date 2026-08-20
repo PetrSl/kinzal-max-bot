@@ -158,9 +158,11 @@ function getOwnerConfirmationKeyboard(requestId, date) {
   }];
 }
 
-// Отправка приветствия с главным меню
+// Отправка приветствия с главным меню (обновлённый текст)
 async function sendWelcome(userId) {
-  await sendMessage(userId, 'Привет! Я бот Кинозала 4K. Выберите действие:', getMainKeyboard());
+  const text = 'Привет! Я бот Кинозала 4K. 👋\n\n' +
+               'Выберите действие ниже или напишите мне любое сообщение — я сразу открою меню.';
+  await sendMessage(userId, text, getMainKeyboard());
 }
 
 // Установка команд бота
@@ -368,5 +370,5 @@ async function setWebhook() {
 app.listen(process.env.PORT || 3000, () => {
   console.log('KinZal MAX Bot server started');
   setWebhook();
-  setCommands();  // <-- установка команд при старте
+  setCommands();
 });
