@@ -73,7 +73,6 @@ if (process.env.BOT_TOKEN) {
   });
 
   bot.hears(/^хочу\s+(.+)$/i, async (ctx) => {
-    // Исправлено: правильное получение ID пользователя
     const userId = ctx.message.sender.user_id;
     const ownerId = process.env.OWNER_ID;
     if (ownerId) {
@@ -90,14 +89,66 @@ if (process.env.BOT_TOKEN) {
     ctx.reply('Привет! Я бот Кинозала 4K. Напишите "Даты" для проверки занятости, или "Хочу [дата]" для брони.');
   });
 
-  bot.start().catch(err => {
-    console.error('Ошибка запуска MAX бота:', err);
+  // Обработка входящего вебхука
+  app.post('/callback', (req, res) => {
+    // Проверяем секрет, если он задан
+    const secret = req.headers['x-max-bot-api-secret'];
+    if (process.env.WEBHOOK_SECRET && secret !== process.env.WEBHOOK_SECRET) {
+      console.error('Неверный секрет webhook');
+      return res.status(403).send('Invalid secret');
+    }
+
+    // Отвечаем сразу, чтобы MAX не ждал
+    res.send('ok');
+
+    // Обрабатываем обновление в фоне
+    bot.handleUpdate(req.body).catch(err => {
+      console.error('Ошибка обработки webhook:', err);
+    });
+  });
+
+  // Установка подписки на вебхук при старте
+  async function setWebhook() {
+    const webhookUrl = process.env.WEBHOOK_URL; // https://kinzal-max-bot.onrender.com/callback
+    const secret = process.env.WEBHOOK_SECRET || '';
+    const updateTypes = ['message_created', 'bot_started', 'message_callback'];
+
+    if (!webhookUrl) {
+      console.error('WEBHOOK_URL не задан, вебхук не установлен');
+      return;
+    }
+
+    try {
+      const response = await axios.post(
+        'https://platform-api2.max.ru/subscriptions',
+        {
+          url: webhookUrl,
+          update_types: updateTypes,
+          secret: secret || undefined // не отправляем, если пусто
+        },
+        {
+          headers: {
+            'Authorization': process.env.BOT_TOKEN,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log('Ответ на подписку:', JSON.stringify(response.data));
+    } catch (e) {
+      console.error('Ошибка установки вебхука:', e.response ? JSON.stringify(e.response.data) : e.message);
+    }
+  }
+
+  // Запуск HTTP-сервера и установка вебхука
+  app.listen(process.env.PORT || 3000, () => {
+    console.log('KinZal MAX Bot server started');
+    setWebhook();
   });
 } else {
   console.log('BOT_TOKEN не задан, MAX бот не запущен');
-}
 
-// HTTP сервер для Render (чтобы сервис не падал)
-app.listen(process.env.PORT || 3000, () => {
-  console.log('KinZal MAX Bot server started');
-});
+  // Даже без токена запускаем HTTP-сервер
+  app.listen(process.env.PORT || 3000, () => {
+    console.log('KinZal MAX Bot server started (без бота)');
+  });
+}
