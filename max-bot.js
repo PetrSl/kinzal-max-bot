@@ -17,12 +17,12 @@ const bot = new Bot(process.env.BOT_TOKEN);
 // Хранилище заявок (requestId -> объект заявки)
 const requests = new Map();
 
-// Функция генерации уникального ID заявки
+// Генерация уникального ID заявки
 function generateRequestId(userId) {
   return `${Date.now()}_${userId}`;
 }
 
-// Функция получения занятых дат (заглушка, пока нет ICAL_URL)
+// Получение занятых дат (заглушка, пока нет ICAL_URL)
 async function getBusyDates() {
   if (process.env.ICAL_URL) {
     try {
@@ -70,7 +70,7 @@ async function sendMessage(userId, text, attachments = []) {
   }
 }
 
-// Функция показа занятости (для текстовой команды, если понадобится)
+// Функция показа занятости (для команды /dates)
 async function sendBusyDates(userId) {
   const busy = await getBusyDates();
   if (busy.length === 0) {
@@ -93,7 +93,7 @@ async function sendBusyDates(userId) {
   await sendMessage(userId, responseText);
 }
 
-// Главная клавиатура (две кнопки)
+// Главная клавиатура
 function getMainKeyboard() {
   return [{
     type: 'inline_keyboard',
@@ -106,7 +106,7 @@ function getMainKeyboard() {
   }];
 }
 
-// Клавиатура меню (дубль "Выбрать дату", контакты)
+// Клавиатура меню
 function getMenuKeyboard() {
   return [{
     type: 'inline_keyboard',
@@ -120,7 +120,7 @@ function getMenuKeyboard() {
   }];
 }
 
-// Клавиатура подтверждения брони для гостя (после ввода даты)
+// Клавиатура подтверждения брони (гость)
 function getConfirmationKeyboard(requestId) {
   return [{
     type: 'inline_keyboard',
@@ -133,7 +133,7 @@ function getConfirmationKeyboard(requestId) {
   }];
 }
 
-// Клавиатура для гостя после подтверждения (кнопка отмены до оплаты)
+// Клавиатура для гостя после подтверждения (отмена до оплаты)
 function getGuestPendingPaymentKeyboard(requestId) {
   return [{
     type: 'inline_keyboard',
@@ -145,7 +145,7 @@ function getGuestPendingPaymentKeyboard(requestId) {
   }];
 }
 
-// Клавиатура для владельца (подтверждение оплаты или отмена)
+// Клавиатура для владельца
 function getOwnerConfirmationKeyboard(requestId, date) {
   return [{
     type: 'inline_keyboard',
@@ -161,6 +161,30 @@ function getOwnerConfirmationKeyboard(requestId, date) {
 // Отправка приветствия с главным меню
 async function sendWelcome(userId) {
   await sendMessage(userId, 'Привет! Я бот Кинозала 4K. Выберите действие:', getMainKeyboard());
+}
+
+// Установка команд бота
+async function setCommands() {
+  const commands = [
+    { name: 'start', description: 'Начать общение и открыть меню' },
+    { name: 'dates', description: 'Показать свободные даты' }
+  ];
+
+  try {
+    const response = await axios.patch(
+      'https://platform-api2.max.ru/me/commands',
+      { commands: commands },
+      {
+        headers: {
+          'Authorization': process.env.BOT_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    console.log('Команды бота установлены:', JSON.stringify(response.data));
+  } catch (error) {
+    console.error('Ошибка установки команд:', error.response ? JSON.stringify(error.response.data) : error.message);
+  }
 }
 
 // Обработка входящего вебхука
@@ -202,10 +226,9 @@ app.post('/callback', async (req, res) => {
 
       if (updateType === 'bot_started' || text.startsWith('/start')) {
         await sendWelcome(userId);
-      } else if (/^(даты|свободные даты|занятость)$/i.test(text)) {
+      } else if (text === '/dates' || /^(даты|свободные даты|занятость)$/i.test(text)) {
         await sendBusyDates(userId);
       } else if (/^\d{2}\.\d{2}\.\d{4}$/.test(text)) {
-        // Гость ввёл дату в формате ДД.ММ.ГГГГ
         const requestId = generateRequestId(userId);
         const request = {
           requestId,
@@ -220,7 +243,6 @@ app.post('/callback', async (req, res) => {
 
         await sendMessage(userId, `Вы выбрали дату: ${text}. Подтвердите бронь:`, getConfirmationKeyboard(requestId));
       } else {
-        // Любое другое сообщение — отправляем приветствие
         await sendWelcome(userId);
       }
     } else if (updateType === 'message_callback') {
@@ -243,7 +265,6 @@ app.post('/callback', async (req, res) => {
         return;
       }
 
-      // Обработка кнопок главного меню
       if (payload === 'choose_date') {
         await sendMessage(userId, 'Введите желаемую дату в формате ДД.ММ.ГГГГ (например, 25.12.2026):');
       } else if (payload === 'main_menu') {
@@ -252,36 +273,26 @@ app.post('/callback', async (req, res) => {
         await sendMessage(userId, 'Вы можете позвонить владельцу: +7 (900) 000-00-00 (заглушка)');
       } else if (payload === 'message_owner') {
         await sendMessage(userId, 'Напишите сообщение владельцу, и я передам его.');
-      }
-      // Обработка подтверждения гостем
-      else if (payload.startsWith('confirm_')) {
+      } else if (payload.startsWith('confirm_')) {
         const requestId = payload.replace('confirm_', '');
         const request = requests.get(requestId);
         if (request && request.status === 'pending_confirmation' && request.guestUserId === userId) {
           request.status = 'confirmed';
           console.log(`Заявка ${requestId} подтверждена гостем`);
 
-          // Уведомляем владельца
-          const ownerMsg = `🔔 Новая заявка на бронь:\nДата: ${request.date}\nОт гостя (id: ${userId})\n\nСтатус: ожидает оплаты`;
-          await sendMessage(request.ownerId, ownerMsg, getOwnerConfirmationKeyboard(requestId, request.date));
-
-          // Отвечаем гостю
+          await sendMessage(request.ownerId, `🔔 Новая заявка на бронь:\nДата: ${request.date}\nОт гостя (id: ${userId})\n\nСтатус: ожидает оплаты`, getOwnerConfirmationKeyboard(requestId, request.date));
           await sendMessage(userId, 'Заявка отправлена! Ожидайте подтверждения оплаты.', getGuestPendingPaymentKeyboard(requestId));
         } else {
           await sendMessage(userId, 'Заявка не найдена или уже обработана.');
         }
-      }
-      // Обработка отмены гостем (до оплаты)
-      else if (payload.startsWith('cancel_')) {
+      } else if (payload.startsWith('cancel_')) {
         const requestId = payload.replace('cancel_', '');
         const request = requests.get(requestId);
         if (request && request.guestUserId === userId && request.status !== 'paid') {
           request.status = 'cancelled';
           console.log(`Заявка ${requestId} отменена гостем`);
 
-          // Уведомляем владельца, если заявка была подтверждена
           if (request.status === 'cancelled' && request.status !== 'pending_confirmation') {
-            // Если заявка уже была confirmed, шлём владельцу отмену
             await sendMessage(request.ownerId, `❌ Заявка на дату ${request.date} отменена гостем.`);
           }
           await sendMessage(userId, 'Заявка отменена.');
@@ -289,33 +300,25 @@ app.post('/callback', async (req, res) => {
         } else {
           await sendMessage(userId, 'Не удалось отменить заявку (возможно, она уже оплачена или не существует).');
         }
-      }
-      // Обработка подтверждения оплаты владельцем
-      else if (payload.startsWith('paid_')) {
+      } else if (payload.startsWith('paid_')) {
         const requestId = payload.replace('paid_', '');
         const request = requests.get(requestId);
         if (request && userId === request.ownerId && request.status === 'confirmed') {
           request.status = 'paid';
           console.log(`Заявка ${requestId} оплачена, бронь подтверждена`);
 
-          // Уведомляем гостя
           await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на ${request.date} подтверждена.`);
-
-          // Здесь в будущем будет отметка в календаре
           requests.delete(requestId);
         } else {
           await sendMessage(userId, 'Заявка не найдена или уже обработана.');
         }
-      }
-      // Обработка отмены владельцем
-      else if (payload.startsWith('owner_cancel_')) {
+      } else if (payload.startsWith('owner_cancel_')) {
         const requestId = payload.replace('owner_cancel_', '');
         const request = requests.get(requestId);
         if (request && userId === request.ownerId) {
           request.status = 'cancelled';
           console.log(`Заявка ${requestId} отменена владельцем`);
 
-          // Уведомляем гостя
           await sendMessage(request.guestUserId, `К сожалению, бронь на ${request.date} отменена владельцем.`);
           requests.delete(requestId);
         } else {
@@ -365,4 +368,5 @@ async function setWebhook() {
 app.listen(process.env.PORT || 3000, () => {
   console.log('KinZal MAX Bot server started');
   setWebhook();
+  setCommands();  // <-- установка команд при старте
 });
