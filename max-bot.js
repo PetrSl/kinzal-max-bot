@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const ical = require('ical');
-const { Bot } = require('@maxhub/max-bot-api');
+const { Bot, Keyboard } = require('@maxhub/max-bot-api');
 
 const app = express();
 app.use(express.json());
@@ -47,10 +47,53 @@ async function getBusyDates() {
 if (process.env.BOT_TOKEN) {
   const bot = new Bot(process.env.BOT_TOKEN);
 
-  bot.command('start', (ctx) => {
-    ctx.reply('Привет! Я бот Кинозала 4K. Напишите "Даты" для проверки занятости, или "Хочу [дата]" для брони.');
+  // Команда /start с кнопками
+  bot.command('start', async (ctx) => {
+    const keyboard = Keyboard.inlineKeyboard([
+      [Keyboard.callbackButton('📅 Свободные даты', 'free_dates')],
+      [Keyboard.callbackButton('📝 Забронировать', 'book')],
+      [Keyboard.callbackButton('📞 Связаться с хозяином', 'contact_owner')]
+    ]);
+
+    await ctx.reply('Привет! Я бот Кинозала 4K. Выберите действие:', {
+      attachments: [keyboard]
+    });
   });
 
+  // Обработка нажатий на кнопки
+  bot.action('free_dates', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const busy = await getBusyDates();
+    if (busy.length === 0) {
+      await ctx.reply('Пока нет данных о занятости. Попробуйте позже.');
+    } else {
+      let responseText = '🎬 *Кинозал 4K: занятость на 30 дней*\n\n';
+      const today = new Date();
+      for (let i = 0; i < 30; i++) {
+        const d = new Date(today);
+        d.setDate(d.getDate() + i);
+        const dateStr = d.toISOString().slice(0, 10);
+        const isBusy = busy.includes(dateStr);
+        const day = d.getDate().toString().padStart(2, '0');
+        const month = (d.getMonth() + 1).toString().padStart(2, '0');
+        responseText += `${isBusy ? '❌' : '✅'} ${day}.${month}\n`;
+      }
+      responseText += '\nЧтобы забронировать, напишите "Хочу [дата]" и я передам хозяину.';
+      await ctx.reply(responseText, { format: 'markdown' });
+    }
+  });
+
+  bot.action('book', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await ctx.reply('Для бронирования напишите желаемую дату в формате: Хочу 25.12.2024');
+  });
+
+  bot.action('contact_owner', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await ctx.reply('Свяжитесь с хозяином: @petrsl или напишите сюда, я передам.');
+  });
+
+  // Обработка текстовых команд (оставил как было)
   bot.hears(/^(даты|свободные даты|занятость)$/i, async (ctx) => {
     const busy = await getBusyDates();
     if (busy.length === 0) {
@@ -91,17 +134,14 @@ if (process.env.BOT_TOKEN) {
 
   // Обработка входящего вебхука
   app.post('/callback', (req, res) => {
-    // Проверяем секрет, если он задан
     const secret = req.headers['x-max-bot-api-secret'];
     if (process.env.WEBHOOK_SECRET && secret !== process.env.WEBHOOK_SECRET) {
       console.error('Неверный секрет webhook');
       return res.status(403).send('Invalid secret');
     }
 
-    // Отвечаем сразу, чтобы MAX не ждал
     res.send('ok');
 
-    // Обрабатываем обновление в фоне
     bot.handleUpdate(req.body).catch(err => {
       console.error('Ошибка обработки webhook:', err);
     });
@@ -109,7 +149,7 @@ if (process.env.BOT_TOKEN) {
 
   // Установка подписки на вебхук при старте
   async function setWebhook() {
-    const webhookUrl = process.env.WEBHOOK_URL; // https://kinzal-max-bot.onrender.com/callback
+    const webhookUrl = process.env.WEBHOOK_URL;
     const secret = process.env.WEBHOOK_SECRET || '';
     const updateTypes = ['message_created', 'bot_started', 'message_callback'];
 
@@ -124,7 +164,7 @@ if (process.env.BOT_TOKEN) {
         {
           url: webhookUrl,
           update_types: updateTypes,
-          secret: secret || undefined // не отправляем, если пусто
+          secret: secret || undefined
         },
         {
           headers: {
@@ -139,7 +179,6 @@ if (process.env.BOT_TOKEN) {
     }
   }
 
-  // Запуск HTTP-сервера и установка вебхука
   app.listen(process.env.PORT || 3000, () => {
     console.log('KinZal MAX Bot server started');
     setWebhook();
@@ -147,7 +186,6 @@ if (process.env.BOT_TOKEN) {
 } else {
   console.log('BOT_TOKEN не задан, MAX бот не запущен');
 
-  // Даже без токена запускаем HTTP-сервер
   app.listen(process.env.PORT || 3000, () => {
     console.log('KinZal MAX Bot server started (без бота)');
   });
