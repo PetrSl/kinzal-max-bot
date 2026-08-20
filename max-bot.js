@@ -121,6 +121,30 @@ async function sendWelcome(userId) {
   await sendMessage(userId, 'Привет! Я бот Кинозала 4K. Выберите действие:', getMainKeyboard());
 }
 
+// НОВАЯ ФУНКЦИЯ: установка команд бота
+async function setCommands() {
+  const commands = [
+    { name: 'start', description: 'Главное меню' },
+    { name: 'dates', description: 'Свободные даты' }
+  ];
+
+  try {
+    const response = await axios.patch(
+      'https://platform-api2.max.ru/me/commands',
+      { commands: commands },
+      {
+        headers: {
+          'Authorization': process.env.BOT_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    console.log('Команды бота установлены:', JSON.stringify(response.data));
+  } catch (error) {
+    console.error('Ошибка установки команд:', error.response ? JSON.stringify(error.response.data) : error.message);
+  }
+}
+
 // Обработка входящего вебхука
 app.post('/callback', async (req, res) => {
   console.log('Webhook received:', JSON.stringify(req.body));
@@ -160,20 +184,16 @@ app.post('/callback', async (req, res) => {
 
       if (updateType === 'bot_started' || text.startsWith('/start')) {
         await sendWelcome(userId);
-      } else if (/^(даты|свободные даты|занятость)$/i.test(text)) {
+      } else if (/^(даты|свободные даты|занятость)$/i.test(text) || text === '/dates') {
         await sendBusyDates(userId);
       } else if (/^хочу\s+(.+)$/i.test(text)) {
         const ownerId = process.env.OWNER_ID;
         if (ownerId) {
-          // Уведомляем владельца о новой заявке
           await sendMessage(ownerId, `🔔 Новая заявка от пользователя (id: ${userId}): ${text}`);
         }
-        // Сохраняем заявку для последующего подтверждения/отмены
         lastRequests.set(userId, { text, timestamp: Date.now() });
-        // Отправляем пользователю сообщение с кнопками подтверждения/отмены
         await sendMessage(userId, 'Ваша заявка принята. Подтвердите или отмените бронь:', getConfirmationKeyboard());
       } else {
-        // Любое другое сообщение — отправляем приветствие с кнопками
         await sendWelcome(userId);
       }
     } else if (updateType === 'message_callback') {
@@ -196,16 +216,13 @@ app.post('/callback', async (req, res) => {
         return;
       }
 
-      // Обработка старых кнопок главного меню
       if (payload === 'free_dates') {
         await sendBusyDates(userId);
       } else if (payload === 'book') {
         await sendMessage(userId, 'Для бронирования напишите желаемую дату в формате: Хочу 25.12.2024');
       } else if (payload === 'contact_owner') {
         await sendMessage(userId, 'Свяжитесь с хозяином: @petrsl или напишите сюда, я передам.');
-      }
-      // Обработка подтверждения брони
-      else if (payload === 'confirm_booking') {
+      } else if (payload === 'confirm_booking') {
         const request = lastRequests.get(userId);
         if (request) {
           const ownerId = process.env.OWNER_ID;
@@ -213,13 +230,11 @@ app.post('/callback', async (req, res) => {
             await sendMessage(ownerId, `✅ Заявка подтверждена пользователем (id: ${userId}): ${request.text}`);
           }
           await sendMessage(userId, 'Бронь подтверждена! Хозяин скоро свяжется с вами.');
-          lastRequests.delete(userId); // очищаем после обработки
+          lastRequests.delete(userId);
         } else {
           await sendMessage(userId, 'Нет активной заявки для подтверждения.');
         }
-      }
-      // Обработка отмены заявки
-      else if (payload === 'cancel_booking') {
+      } else if (payload === 'cancel_booking') {
         const request = lastRequests.get(userId);
         if (request) {
           const ownerId = process.env.OWNER_ID;
@@ -275,4 +290,5 @@ async function setWebhook() {
 app.listen(process.env.PORT || 3000, () => {
   console.log('KinZal MAX Bot server started');
   setWebhook();
+  setCommands(); // <-- установка команд при старте
 });
