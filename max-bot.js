@@ -7,8 +7,6 @@ const { Bot } = require('@maxhub/max-bot-api');
 const app = express();
 app.use(express.json());
 
-app.get('/', (req, res) => res.send('KinZal MAX Bot is running'));
-
 // Проверка обязательных переменных
 if (!process.env.BOT_TOKEN) {
   console.error('BOT_TOKEN не задан, завершение работы');
@@ -16,6 +14,9 @@ if (!process.env.BOT_TOKEN) {
 }
 
 const bot = new Bot(process.env.BOT_TOKEN);
+
+// Глобальное хранилище последних заявок (userId -> { text, timestamp })
+const lastRequests = new Map();
 
 // Функция получения занятых дат
 async function getBusyDates() {
@@ -88,30 +89,36 @@ async function sendBusyDates(userId) {
   await sendMessage(userId, responseText);
 }
 
-// Создание inline-клавиатуры
+// Основная клавиатура (главное меню)
 function getMainKeyboard() {
   return [{
     type: 'inline_keyboard',
     payload: {
       buttons: [
-        [
-          { type: 'callback', text: '📅 Свободные даты', payload: 'free_dates' }
-        ],
-        [
-          { type: 'callback', text: '📝 Забронировать', payload: 'book' }
-        ],
-        [
-          { type: 'callback', text: '📞 Связаться с хозяином', payload: 'contact_owner' }
-        ]
+        [{ type: 'callback', text: '📅 Свободные даты', payload: 'free_dates' }],
+        [{ type: 'callback', text: '📝 Забронировать', payload: 'book' }],
+        [{ type: 'callback', text: '📞 Связаться с хозяином', payload: 'contact_owner' }]
       ]
     }
   }];
 }
 
-// Отправка приветствия с кнопками
+// Клавиатура подтверждения/отмены заявки
+function getConfirmationKeyboard() {
+  return [{
+    type: 'inline_keyboard',
+    payload: {
+      buttons: [
+        [{ type: 'callback', text: '✅ Подтвердить бронь', payload: 'confirm_booking' }],
+        [{ type: 'callback', text: '❌ Отменить заявку', payload: 'cancel_booking' }]
+      ]
+    }
+  }];
+}
+
+// Отправка приветствия с главным меню
 async function sendWelcome(userId) {
-  const text = 'Привет! Я бот Кинозала 4K. Выберите действие:';
-  await sendMessage(userId, text, getMainKeyboard());
+  await sendMessage(userId, 'Привет! Я бот Кинозала 4K. Выберите действие:', getMainKeyboard());
 }
 
 // Обработка входящего вебхука
@@ -158,10 +165,15 @@ app.post('/callback', async (req, res) => {
       } else if (/^хочу\s+(.+)$/i.test(text)) {
         const ownerId = process.env.OWNER_ID;
         if (ownerId) {
+          // Уведомляем владельца о новой заявке
           await sendMessage(ownerId, `🔔 Новая заявка от пользователя (id: ${userId}): ${text}`);
         }
-        await sendMessage(userId, 'Спасибо! Я передал запрос хозяину, он скоро свяжется с вами.');
+        // Сохраняем заявку для последующего подтверждения/отмены
+        lastRequests.set(userId, { text, timestamp: Date.now() });
+        // Отправляем пользователю сообщение с кнопками подтверждения/отмены
+        await sendMessage(userId, 'Ваша заявка принята. Подтвердите или отмените бронь:', getConfirmationKeyboard());
       } else {
+        // Любое другое сообщение — отправляем приветствие с кнопками
         await sendWelcome(userId);
       }
     } else if (updateType === 'message_callback') {
@@ -170,17 +182,12 @@ app.post('/callback', async (req, res) => {
       let userId = null;
       let payload = null;
 
-      // Правильное извлечение из структуры callback
       if (body.callback && body.callback.user) {
         userId = body.callback.user.user_id;
       }
       if (body.callback && body.callback.payload) {
         payload = body.callback.payload;
       }
-
-      // Запасные варианты на случай изменения структуры
-      if (!userId && body.user) userId = body.user.user_id;
-      if (!payload && body.payload) payload = body.payload;
 
       console.log(`Callback: user_id = ${userId}, payload = ${payload}`);
 
@@ -189,12 +196,41 @@ app.post('/callback', async (req, res) => {
         return;
       }
 
+      // Обработка старых кнопок главного меню
       if (payload === 'free_dates') {
         await sendBusyDates(userId);
       } else if (payload === 'book') {
         await sendMessage(userId, 'Для бронирования напишите желаемую дату в формате: Хочу 25.12.2024');
       } else if (payload === 'contact_owner') {
         await sendMessage(userId, 'Свяжитесь с хозяином: @petrsl или напишите сюда, я передам.');
+      }
+      // Обработка подтверждения брони
+      else if (payload === 'confirm_booking') {
+        const request = lastRequests.get(userId);
+        if (request) {
+          const ownerId = process.env.OWNER_ID;
+          if (ownerId) {
+            await sendMessage(ownerId, `✅ Заявка подтверждена пользователем (id: ${userId}): ${request.text}`);
+          }
+          await sendMessage(userId, 'Бронь подтверждена! Хозяин скоро свяжется с вами.');
+          lastRequests.delete(userId); // очищаем после обработки
+        } else {
+          await sendMessage(userId, 'Нет активной заявки для подтверждения.');
+        }
+      }
+      // Обработка отмены заявки
+      else if (payload === 'cancel_booking') {
+        const request = lastRequests.get(userId);
+        if (request) {
+          const ownerId = process.env.OWNER_ID;
+          if (ownerId) {
+            await sendMessage(ownerId, `❌ Заявка отменена пользователем (id: ${userId}): ${request.text}`);
+          }
+          await sendMessage(userId, 'Заявка отменена.');
+          lastRequests.delete(userId);
+        } else {
+          await sendMessage(userId, 'Нет активной заявки для отмены.');
+        }
       } else {
         console.log('Неизвестный payload:', payload);
       }
