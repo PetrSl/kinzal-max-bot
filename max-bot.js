@@ -167,14 +167,22 @@ app.post('/callback', async (req, res) => {
     } else if (updateType === 'message_callback') {
       console.log('Получен callback:', JSON.stringify(body));
 
-      let userId = body.user ? body.user.user_id : null;
-      let payload = body.payload;
+      let userId = null;
+      let payload = null;
 
-      if (!payload && body.message && body.message.payload) {
-        payload = body.message.payload;
-      } else if (!payload && body.callback && body.callback.payload) {
+      // Правильное извлечение из структуры callback
+      if (body.callback && body.callback.user) {
+        userId = body.callback.user.user_id;
+      }
+      if (body.callback && body.callback.payload) {
         payload = body.callback.payload;
       }
+
+      // Запасные варианты на случай изменения структуры
+      if (!userId && body.user) userId = body.user.user_id;
+      if (!payload && body.payload) payload = body.payload;
+
+      console.log(`Callback: user_id = ${userId}, payload = ${payload}`);
 
       if (!userId) {
         console.error('Не удалось определить user_id из callback');
