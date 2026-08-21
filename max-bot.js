@@ -93,7 +93,6 @@ function calculatePrice(dates, guestsCount) {
   if (pricingConfig.discounts && pricingConfig.discounts.enabled) {
     const nights = dates.length;
     const rules = pricingConfig.discounts.rules || [];
-    // Находим самое выгодное правило
     let selectedRule = null;
     for (let rule of rules) {
       if (nights >= rule.min_nights) {
@@ -101,7 +100,6 @@ function calculatePrice(dates, guestsCount) {
       }
     }
     if (selectedRule) {
-      // Проверяем, не опустится ли цена за ночь ниже min_price_per_night
       const basePerNight = baseTotal / nights;
       const maxDiscount = Math.max(0, basePerNight - pricingConfig.min_price_per_night);
       appliedDiscountPerNight = Math.min(selectedRule.discount_per_night, maxDiscount);
@@ -112,7 +110,6 @@ function calculatePrice(dates, guestsCount) {
 
   total = baseTotal - discountTotal;
 
-  // Доплата за третьего гостя
   let thirdGuestTotal = 0;
   if (guestsCount === 3) {
     const thirdGuestFee = stageConfig.third_guest_fee || 700;
@@ -121,7 +118,6 @@ function calculatePrice(dates, guestsCount) {
     details.push(`Доплата за 3-го гостя: ${thirdGuestTotal}₽`);
   }
 
-  // Депозит
   if (pricingConfig.deposit > 0) {
     total += pricingConfig.deposit;
     details.push(`Депозит: ${pricingConfig.deposit}₽`);
@@ -137,8 +133,85 @@ function calculatePrice(dates, guestsCount) {
   };
 }
 
-// Остальные функции: getBusyDates, sendMessage, sendBusyDates, getRulesText, клавиатуры и т.д.
-// ... (аналогично предыдущей версии, но buildContractText использует результат calculatePrice)
+// ===== ВАЖНО: функция sendMessage =====
+async function sendMessage(userId, text, attachments = [], useMarkdown = true) {
+  try {
+    console.log(`Отправляю сообщение пользователю ${userId}: ${text}`);
+    await bot.api.sendMessageToUser(userId, text, {
+      attachments: attachments,
+      format: useMarkdown ? 'markdown' : undefined
+    });
+    console.log('Сообщение отправлено');
+  } catch (error) {
+    console.error('Ошибка отправки сообщения:', error);
+  }
+}
+// =======================================
+
+async function sendBusyDates(userId) {
+  const busy = await getBusyDates();
+  if (busy.length === 0) {
+    await sendMessage(userId, 'Пока нет данных о занятости. Попробуйте позже.');
+    return;
+  }
+
+  let responseText = '🎬 *Кинозал 4K: занятость на 30 дней*\n\n';
+  const today = new Date();
+  for (let i = 0; i < 30; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + i);
+    const dateStr = d.toISOString().slice(0, 10);
+    const isBusy = busy.includes(dateStr);
+    const day = d.getDate().toString().padStart(2, '0');
+    const month = (d.getMonth() + 1).toString().padStart(2, '0');
+    responseText += `${isBusy ? '❌' : '✅'} ${day}.${month}\n`;
+  }
+  responseText += '\nЧтобы забронировать, нажмите «Выбрать дату».';
+  await sendMessage(userId, responseText);
+}
+
+async function getBusyDates() {
+  if (process.env.ICAL_URL) {
+    try {
+      const response = await axios.get(process.env.ICAL_URL);
+      const data = ical.parseICS(response.data);
+      const busyDates = new Set();
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const thirtyDaysLater = new Date(today);
+      thirtyDaysLater.setDate(thirtyDaysLater.getDate() + 30);
+
+      for (let k in data) {
+        if (data[k].type === 'VEVENT') {
+          const start = new Date(data[k].start);
+          const end = new Date(data[k].end);
+          for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
+            const current = new Date(d);
+            if (current >= today && current <= thirtyDaysLater) {
+              busyDates.add(current.toISOString().slice(0, 10));
+            }
+          }
+        }
+      }
+      return Array.from(busyDates).sort();
+    } catch (e) {
+      console.error('Ошибка iCal:', e);
+      return [];
+    }
+  } else {
+    return [];
+  }
+}
+
+function getRulesText() {
+  return '⚠️ *Важно знать:*\n' +
+    '• Только для граждан РФ\n' +
+    '• Возраст от 21 года\n' +
+    '• Правила проживания:\n' +
+    '  - не курить, не шуметь после 22:00\n' +
+    '  - не проводить вечеринки\n' +
+    '  - соблюдать чистоту';
+}
 
 function getMainKeyboard() {
   return [{
@@ -168,16 +241,6 @@ function getMenuKeyboard() {
       }
     }]
   };
-}
-
-function getRulesText() {
-  return '⚠️ *Важно знать:*\n' +
-    '• Только для граждан РФ\n' +
-    '• Возраст от 21 года\n' +
-    '• Правила проживания:\n' +
-    '  - не курить, не шуметь после 22:00\n' +
-    '  - не проводить вечеринки\n' +
-    '  - соблюдать чистоту';
 }
 
 function getConfirmationKeyboard(requestId) {
@@ -411,7 +474,6 @@ async function processContractStep(userId, text, attachments, request) {
       await sendMessage(userId, 'Неверный код, попробуйте ещё раз:');
     }
   } else if (step === 'guests_count') {
-    // Ожидаем, что гости выбраны через callback, текстовые сообщения не обрабатываем
     await sendMessage(userId, 'Пожалуйста, выберите количество гостей кнопками.');
   } else if (step === 'selfie') {
     const hasImage = attachments && attachments.some(att => att.type === 'image');
@@ -421,7 +483,6 @@ async function processContractStep(userId, text, attachments, request) {
       request.step = null;
       console.log(`Данные по заявке ${request.requestId} собраны, отправляем договор`);
 
-      // Рассчитываем цену
       const price = calculatePrice(request.dates, request.contractData.guestsCount);
       request.price = price;
 
@@ -583,15 +644,13 @@ app.post('/callback', async (req, res) => {
           activeSelectingRequest.status = 'pending_confirmation';
           const datesStr = activeSelectingRequest.dates.join(', ');
 
-          // Перед подтверждением показываем расчёт стоимости
-          const price = calculatePrice(activeSelectingRequest.dates, 2); // пока 2 гостя, уточним после
+          const price = calculatePrice(activeSelectingRequest.dates, 2); // предварительно для 2 гостей
           const priceText = `💰 *Предварительный расчёт:*\n${price.details}\n\nИтого: ${price.total} ₽\n\nПодтвердите бронь:`;
           await sendMessage(userId, priceText, getConfirmationKeyboard(activeSelectingRequest.requestId));
         } else {
           await sendMessage(userId, 'Нет выбранных дат. Начните выбор заново.', getMainKeyboard());
         }
       } else if (payload === 'guests_2' || payload === 'guests_3') {
-        // Обработка выбора количества гостей
         let activeContractRequest = null;
         for (let [id, req] of requests) {
           if (req.guestUserId === userId && req.status === 'contract_in_progress' && req.step === 'guests_count') {
