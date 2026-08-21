@@ -14,7 +14,7 @@ if (!process.env.BOT_TOKEN) {
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
-// Хранилище заявок (requestId -> объект заявки)
+// Хранилище заявок: requestId -> объект заявки
 const requests = new Map();
 
 // Генерация уникального ID заявки
@@ -106,59 +106,83 @@ function getMainKeyboard() {
   }];
 }
 
-// Клавиатура меню
+// Клавиатура меню (с доп. информацией)
 function getMenuKeyboard() {
-  return [{
-    type: 'inline_keyboard',
-    payload: {
-      buttons: [
-        [{ type: 'callback', text: '📅 Выбрать дату', payload: 'choose_date' }],
-        [{ type: 'callback', text: '📞 Позвонить владельцу', payload: 'call_owner' }],
-        [{ type: 'callback', text: '💬 Написать владельцу', payload: 'message_owner' }]
-      ]
-    }
-  }];
+  const infoText = '⚠️ *Важно знать:*\n' +
+    '• Только для граждан РФ\n' +
+    '• Возраст от 21 года\n' +
+    '• Правила проживания:\n' +
+    '  - не курить, не шуметь после 22:00\n' +
+    '  - не проводить вечеринки\n' +
+    '  - соблюдать чистоту\n\n' +
+    'Выберите действие:';
+  return {
+    text: infoText,
+    attachments: [{
+      type: 'inline_keyboard',
+      payload: {
+        buttons: [
+          [{ type: 'callback', text: '📅 Выбрать дату', payload: 'choose_date' }],
+          [{ type: 'callback', text: '📞 Позвонить владельцу', payload: 'call_owner' }],
+          [{ type: 'callback', text: '💬 Написать владельцу', payload: 'message_owner' }]
+        ]
+      }
+    }]
+  };
 }
 
-// Клавиатура подтверждения брони (гость)
+// Клавиатура подтверждения брони (гость) — только "Подтвердить"
 function getConfirmationKeyboard(requestId) {
   return [{
     type: 'inline_keyboard',
     payload: {
       buttons: [
-        [{ type: 'callback', text: '✅ Подтвердить бронь', payload: `confirm_${requestId}` }],
-        [{ type: 'callback', text: '❌ Отменить', payload: `cancel_${requestId}` }]
+        [{ type: 'callback', text: '✅ Подтвердить бронь', payload: `confirm_${requestId}` }]
       ]
     }
   }];
 }
 
-// Клавиатура для гостя после подтверждения (отмена до оплаты)
-function getGuestPendingPaymentKeyboard(requestId) {
+// Клавиатура для гостя после резервирования (оформить договор или отменить резерв)
+function getReservationKeyboard(requestId) {
   return [{
     type: 'inline_keyboard',
     payload: {
       buttons: [
-        [{ type: 'callback', text: '❌ Отменить заявку', payload: `cancel_${requestId}` }]
+        [{ type: 'callback', text: '📝 Оформить договор', payload: `contract_${requestId}` }],
+        [{ type: 'callback', text: '❌ Отменить резерв', payload: `cancel_reserve_${requestId}` }]
       ]
     }
   }];
 }
 
-// Клавиатура для владельца
-function getOwnerConfirmationKeyboard(requestId, date) {
+// Клавиатура для владельца (подтверждение оплаты или отмена)
+function getOwnerConfirmationKeyboard(requestId, dates) {
   return [{
     type: 'inline_keyboard',
     payload: {
       buttons: [
-        [{ type: 'callback', text: `✅ Бронь на ${date} оплачена`, payload: `paid_${requestId}` }],
+        [{ type: 'callback', text: `✅ Бронь на ${dates} оплачена`, payload: `paid_${requestId}` }],
         [{ type: 'callback', text: '❌ Отменить бронь', payload: `owner_cancel_${requestId}` }]
       ]
     }
   }];
 }
 
-// Отправка приветствия с главным меню (обновлённый текст)
+// Клавиатура для добавления ещё одной даты
+function getAddDateKeyboard() {
+  return [{
+    type: 'inline_keyboard',
+    payload: {
+      buttons: [
+        [{ type: 'callback', text: '➕ Добавить дату', payload: 'add_date' }],
+        [{ type: 'callback', text: '✅ Готово', payload: 'dates_done' }]
+      ]
+    }
+  }];
+}
+
+// Отправка приветствия с главным меню
 async function sendWelcome(userId) {
   const text = 'Привет! Я бот Кинозала 4K. 👋\n\n' +
                'Выберите действие ниже или напишите мне любое сообщение — я сразу открою меню.';
@@ -231,19 +255,36 @@ app.post('/callback', async (req, res) => {
       } else if (text === '/dates' || /^(даты|свободные даты|занятость)$/i.test(text)) {
         await sendBusyDates(userId);
       } else if (/^\d{2}\.\d{2}\.\d{4}$/.test(text)) {
-        const requestId = generateRequestId(userId);
-        const request = {
-          requestId,
-          guestUserId: userId,
-          ownerId: process.env.OWNER_ID,
-          date: text,
-          status: 'pending_confirmation',
-          timestamp: Date.now()
-        };
-        requests.set(requestId, request);
-        console.log(`Создана заявка ${requestId}:`, request);
+        // Пользователь ввёл дату
+        // Если у пользователя уже есть активная заявка в процессе выбора дат, добавляем дату
+        let activeRequest = null;
+        for (let [id, req] of requests) {
+          if (req.guestUserId === userId && req.status === 'selecting_dates') {
+            activeRequest = req;
+            break;
+          }
+        }
 
-        await sendMessage(userId, `Вы выбрали дату: ${text}. Подтвердите бронь:`, getConfirmationKeyboard(requestId));
+        if (activeRequest) {
+          // Добавляем дату к существующей заявке
+          activeRequest.dates.push(text);
+          await sendMessage(userId, `Дата ${text} добавлена. Добавить ещё дату?`, getAddDateKeyboard());
+        } else {
+          // Создаём новую заявку со статусом selecting_dates
+          const requestId = generateRequestId(userId);
+          const request = {
+            requestId,
+            guestUserId: userId,
+            ownerId: process.env.OWNER_ID,
+            dates: [text],
+            status: 'selecting_dates',
+            timestamp: Date.now(),
+            step: null,
+            contractData: {}
+          };
+          requests.set(requestId, request);
+          await sendMessage(userId, `Вы выбрали дату: ${text}. Добавить ещё дату?`, getAddDateKeyboard());
+        }
       } else {
         await sendWelcome(userId);
       }
@@ -267,52 +308,98 @@ app.post('/callback', async (req, res) => {
         return;
       }
 
+      // Обработка кнопок главного меню
       if (payload === 'choose_date') {
-        await sendMessage(userId, 'Введите желаемую дату в формате ДД.ММ.ГГГГ (например, 25.12.2026):');
+        // Начинаем процесс выбора дат
+        // Если уже есть активная заявка с selecting_dates, напоминаем
+        let activeRequest = null;
+        for (let [id, req] of requests) {
+          if (req.guestUserId === userId && req.status === 'selecting_dates') {
+            activeRequest = req;
+            break;
+          }
+        }
+        if (activeRequest) {
+          await sendMessage(userId, `У вас уже начат выбор дат. Текущие даты: ${activeRequest.dates.join(', ')}. Введите ещё дату или нажмите «Готово».`, getAddDateKeyboard());
+        } else {
+          await sendMessage(userId, 'Введите желаемую дату в формате ДД.ММ.ГГГГ (например, 25.12.2026).');
+        }
       } else if (payload === 'main_menu') {
-        await sendMessage(userId, 'Меню:', getMenuKeyboard());
+        const menu = getMenuKeyboard();
+        await sendMessage(userId, menu.text, menu.attachments);
       } else if (payload === 'call_owner') {
         await sendMessage(userId, 'Вы можете позвонить владельцу: +7 (900) 000-00-00 (заглушка)');
       } else if (payload === 'message_owner') {
         await sendMessage(userId, 'Напишите сообщение владельцу, и я передам его.');
+      } else if (payload === 'add_date') {
+        // Просим ввести ещё дату
+        await sendMessage(userId, 'Введите ещё дату в формате ДД.ММ.ГГГГ:');
+      } else if (payload === 'dates_done') {
+        // Пользователь завершил выбор дат
+        let activeRequest = null;
+        for (let [id, req] of requests) {
+          if (req.guestUserId === userId && req.status === 'selecting_dates') {
+            activeRequest = req;
+            break;
+          }
+        }
+        if (activeRequest && activeRequest.dates.length > 0) {
+          // Меняем статус на pending_confirmation и отправляем подтверждение
+          activeRequest.status = 'pending_confirmation';
+          const datesStr = activeRequest.dates.join(', ');
+          await sendMessage(userId, `Вы выбрали даты: ${datesStr}. Подтвердите бронь:`, getConfirmationKeyboard(activeRequest.requestId));
+        } else {
+          await sendMessage(userId, 'Нет выбранных дат. Начните выбор заново.', getMainKeyboard());
+        }
       } else if (payload.startsWith('confirm_')) {
         const requestId = payload.replace('confirm_', '');
         const request = requests.get(requestId);
         if (request && request.status === 'pending_confirmation' && request.guestUserId === userId) {
-          request.status = 'confirmed';
-          console.log(`Заявка ${requestId} подтверждена гостем`);
+          // Резервируем даты на 30 минут
+          request.status = 'reserved';
+          request.reservationExpires = Date.now() + 30 * 60 * 1000; // 30 минут
+          console.log(`Заявка ${requestId} переведена в статус reserved`);
 
-          await sendMessage(request.ownerId, `🔔 Новая заявка на бронь:\nДата: ${request.date}\nОт гостя (id: ${userId})\n\nСтатус: ожидает оплаты`, getOwnerConfirmationKeyboard(requestId, request.date));
-          await sendMessage(userId, 'Заявка отправлена! Ожидайте подтверждения оплаты.', getGuestPendingPaymentKeyboard(requestId));
+          const datesStr = request.dates.join(', ');
+          await sendMessage(userId, `✅ Дата(ы) ${datesStr} зарезервированы на 30 минут. Пожалуйста, оформите договор за это время.`, getReservationKeyboard(requestId));
         } else {
           await sendMessage(userId, 'Заявка не найдена или уже обработана.');
         }
-      } else if (payload.startsWith('cancel_')) {
-        const requestId = payload.replace('cancel_', '');
+      } else if (payload.startsWith('contract_')) {
+        const requestId = payload.replace('contract_', '');
         const request = requests.get(requestId);
-        if (request && request.guestUserId === userId && request.status !== 'paid') {
+        if (request && request.status === 'reserved' && request.guestUserId === userId) {
+          // Начинаем оформление договора: запрашиваем ФИО
+          request.status = 'contract_in_progress';
+          request.step = 'full_name';
+          await sendMessage(userId, 'Для оформления договора, пожалуйста, укажите ваше полное ФИО (например, Иванов Иван Иванович):');
+        } else {
+          await sendMessage(userId, 'Резерв не найден или уже истёк.');
+        }
+      } else if (payload.startsWith('cancel_reserve_')) {
+        const requestId = payload.replace('cancel_reserve_', '');
+        const request = requests.get(requestId);
+        if (request && request.status === 'reserved' && request.guestUserId === userId) {
           request.status = 'cancelled';
-          console.log(`Заявка ${requestId} отменена гостем`);
-
-          if (request.status === 'cancelled' && request.status !== 'pending_confirmation') {
-            await sendMessage(request.ownerId, `❌ Заявка на дату ${request.date} отменена гостем.`);
-          }
-          await sendMessage(userId, 'Заявка отменена.');
+          console.log(`Резерв ${requestId} отменён гостем`);
+          await sendMessage(userId, 'Резерв отменён.');
           requests.delete(requestId);
         } else {
-          await sendMessage(userId, 'Не удалось отменить заявку (возможно, она уже оплачена или не существует).');
+          await sendMessage(userId, 'Не удалось отменить резерв.');
         }
       } else if (payload.startsWith('paid_')) {
         const requestId = payload.replace('paid_', '');
         const request = requests.get(requestId);
-        if (request && userId === request.ownerId && request.status === 'confirmed') {
+        if (request && userId === request.ownerId && request.status === 'contract_signed') {
           request.status = 'paid';
-          console.log(`Заявка ${requestId} оплачена, бронь подтверждена`);
+          console.log(`Заявка ${requestId} оплачена`);
 
-          await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на ${request.date} подтверждена.`);
+          const datesStr = request.dates.join(', ');
+          const key = `KEY-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+          await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на даты ${datesStr} подтверждена.\n\nВаш электронный ключ: ${key}\n\nПриятного просмотра!`);
           requests.delete(requestId);
         } else {
-          await sendMessage(userId, 'Заявка не найдена или уже обработана.');
+          await sendMessage(userId, 'Заявка не найдена или её статус не позволяет подтвердить оплату.');
         }
       } else if (payload.startsWith('owner_cancel_')) {
         const requestId = payload.replace('owner_cancel_', '');
@@ -320,11 +407,10 @@ app.post('/callback', async (req, res) => {
         if (request && userId === request.ownerId) {
           request.status = 'cancelled';
           console.log(`Заявка ${requestId} отменена владельцем`);
-
-          await sendMessage(request.guestUserId, `К сожалению, бронь на ${request.date} отменена владельцем.`);
+          await sendMessage(request.guestUserId, `К сожалению, бронь на даты ${request.dates.join(', ')} отменена владельцем.`);
           requests.delete(requestId);
         } else {
-          await sendMessage(userId, 'Заявка не найдена или уже обработана.');
+          await sendMessage(userId, 'Заявка не найдена.');
         }
       } else {
         console.log('Неизвестный payload:', payload);
