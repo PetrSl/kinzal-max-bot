@@ -8,6 +8,12 @@ const { Bot } = require('@maxhub/max-bot-api');
 const app = express();
 app.use(express.json());
 
+// ===== КОРНЕВОЙ МАРШРУТ ДЛЯ МОНИТОРИНГА =====
+app.get('/', (req, res) => {
+  res.status(200).send('KinZal MAX Bot is running');
+});
+// ==============================================
+
 if (!process.env.BOT_TOKEN) {
   console.error('BOT_TOKEN не задан, завершение работы');
   process.exit(1);
