@@ -540,6 +540,10 @@ async function processContractStep(userId, text, attachments, request) {
         `Паспорт: ${request.contractData.passport}\n` +
         `Телефон: ${request.contractData.phone}\n` +
         `Количество гостей: ${request.contractData.guestsCount}\n` +
+        `Базовая стоимость: ${request.price.baseTotal} ₽\n` +
+        `Скидка: ${request.price.discountTotal > 0 ? `-${request.price.discountTotal}₽` : '0₽'}\n` +
+        (request.price.thirdGuestTotal > 0 ? `Доплата за 3-го гостя: ${request.price.thirdGuestTotal} ₽\n` : '') +
+        `Депозит: ${request.price.deposit} ₽\n` +
         `Сумма к оплате: ${request.price.total} ₽\n\n` +
         `Статус: ожидает оплаты`;
       await sendMessage(request.ownerId, ownerText, getOwnerConfirmationKeyboard(request.requestId, request.dates.join(', ')));
