@@ -93,14 +93,26 @@ async function sendBusyDates(userId) {
   await sendMessage(userId, responseText);
 }
 
-// Главная клавиатура
+// Текст с правилами
+function getRulesText() {
+  return '⚠️ *Важно знать:*\n' +
+    '• Только для граждан РФ\n' +
+    '• Возраст от 21 года\n' +
+    '• Правила проживания:\n' +
+    '  - не курить, не шуметь после 22:00\n' +
+    '  - не проводить вечеринки\n' +
+    '  - соблюдать чистоту';
+}
+
+// Главная клавиатура (теперь с кнопкой Правила)
 function getMainKeyboard() {
   return [{
     type: 'inline_keyboard',
     payload: {
       buttons: [
         [{ type: 'callback', text: '📅 Выбрать дату', payload: 'choose_date' }],
-        [{ type: 'callback', text: '📋 Меню', payload: 'main_menu' }]
+        [{ type: 'callback', text: '📋 Меню', payload: 'main_menu' }],
+        [{ type: 'callback', text: '📜 Правила проживания', payload: 'rules' }]
       ]
     }
   }];
@@ -108,14 +120,7 @@ function getMainKeyboard() {
 
 // Клавиатура меню (с доп. информацией)
 function getMenuKeyboard() {
-  const infoText = '⚠️ *Важно знать:*\n' +
-    '• Только для граждан РФ\n' +
-    '• Возраст от 21 года\n' +
-    '• Правила проживания:\n' +
-    '  - не курить, не шуметь после 22:00\n' +
-    '  - не проводить вечеринки\n' +
-    '  - соблюдать чистоту\n\n' +
-    'Выберите действие:';
+  const infoText = getRulesText();
   return {
     text: infoText,
     attachments: [{
@@ -131,7 +136,7 @@ function getMenuKeyboard() {
   };
 }
 
-// Клавиатура подтверждения брони (гость) — только "Подтвердить"
+// Клавиатура подтверждения брони (гость)
 function getConfirmationKeyboard(requestId) {
   return [{
     type: 'inline_keyboard',
@@ -143,7 +148,7 @@ function getConfirmationKeyboard(requestId) {
   }];
 }
 
-// Клавиатура для гостя после резервирования (оформить договор или отменить резерв)
+// Клавиатура для гостя после резервирования
 function getReservationKeyboard(requestId) {
   return [{
     type: 'inline_keyboard',
@@ -213,6 +218,53 @@ async function setCommands() {
   }
 }
 
+// Обработка шагов оформления договора
+async function processContractStep(userId, text, attachments, request) {
+  const step = request.step;
+
+  if (step === 'full_name') {
+    request.contractData.fullName = text.trim();
+    request.step = 'passport';
+    await sendMessage(userId, 'Спасибо! Теперь укажите серию и номер паспорта (например, 4510 123456):');
+  } else if (step === 'passport') {
+    request.contractData.passport = text.trim();
+    request.step = 'phone';
+    await sendMessage(userId, 'Укажите номер телефона в формате +7XXXXXXXXXX:');
+  } else if (step === 'phone') {
+    request.contractData.phone = text.trim();
+    request.smsCode = '1234';
+    request.step = 'sms_code';
+    await sendMessage(userId, `На номер ${text.trim()} отправлен SMS-код (заглушка: ${request.smsCode}). Введите код:`);
+  } else if (step === 'sms_code') {
+    if (text.trim() === request.smsCode) {
+      request.step = 'selfie';
+      await sendMessage(userId, 'Код верный! Теперь отправьте селфи с паспортом в развернутом виде (фото).');
+    } else {
+      await sendMessage(userId, 'Неверный код, попробуйте ещё раз:');
+    }
+  } else if (step === 'selfie') {
+    const hasImage = attachments && attachments.some(att => att.type === 'image');
+    if (hasImage) {
+      request.contractData.selfie = attachments.find(att => att.type === 'image').payload?.token || 'received';
+      request.status = 'contract_signed';
+      request.step = null;
+      console.log(`Договор по заявке ${request.requestId} оформлен`);
+
+      const ownerText = `🔔 Гость оформил договор.\n\n` +
+        `Даты: ${request.dates.join(', ')}\n` +
+        `ФИО: ${request.contractData.fullName}\n` +
+        `Паспорт: ${request.contractData.passport}\n` +
+        `Телефон: ${request.contractData.phone}\n\n` +
+        `Статус: ожидает оплаты`;
+      await sendMessage(request.ownerId, ownerText, getOwnerConfirmationKeyboard(request.requestId, request.dates.join(', ')));
+
+      await sendMessage(userId, 'Договор оформлен! Ожидайте подтверждения оплаты от владельца.');
+    } else {
+      await sendMessage(userId, 'Пожалуйста, отправьте фото (селфи с паспортом).');
+    }
+  }
+}
+
 // Обработка входящего вебхука
 app.post('/callback', async (req, res) => {
   console.log('Webhook received:', JSON.stringify(req.body));
@@ -232,6 +284,7 @@ app.post('/callback', async (req, res) => {
     if (updateType === 'message_created' || updateType === 'bot_started') {
       let userId;
       let text = '';
+      let attachments = [];
 
       if (updateType === 'bot_started') {
         userId = body.user ? body.user.user_id : null;
@@ -241,6 +294,9 @@ app.post('/callback', async (req, res) => {
         if (message.body && typeof message.body.text === 'string') {
           text = message.body.text;
         }
+        if (message.body && Array.isArray(message.body.attachments)) {
+          attachments = message.body.attachments;
+        }
       }
 
       if (!userId) {
@@ -248,29 +304,36 @@ app.post('/callback', async (req, res) => {
         return;
       }
 
-      console.log(`Событие: ${updateType}, user_id: ${userId}, текст: "${text}"`);
+      console.log(`Событие: ${updateType}, user_id: ${userId}, текст: "${text}", attachments: ${attachments.length}`);
 
-      if (updateType === 'bot_started' || text.startsWith('/start')) {
-        await sendWelcome(userId);
-      } else if (text === '/dates' || /^(даты|свободные даты|занятость)$/i.test(text)) {
-        await sendBusyDates(userId);
-      } else if (/^\d{2}\.\d{2}\.\d{4}$/.test(text)) {
-        // Пользователь ввёл дату
-        // Если у пользователя уже есть активная заявка в процессе выбора дат, добавляем дату
-        let activeRequest = null;
+      // Проверка активного договора
+      let activeContractRequest = null;
+      for (let [id, req] of requests) {
+        if (req.guestUserId === userId && req.status === 'contract_in_progress') {
+          activeContractRequest = req;
+          break;
+        }
+      }
+
+      if (activeContractRequest) {
+        await processContractStep(userId, text, attachments, activeContractRequest);
+        return;
+      }
+
+      // Если заявка в статусе выбора дат и пришло текстовое сообщение с датой
+      if (/^\d{2}\.\d{2}\.\d{4}$/.test(text)) {
+        let activeSelectingRequest = null;
         for (let [id, req] of requests) {
           if (req.guestUserId === userId && req.status === 'selecting_dates') {
-            activeRequest = req;
+            activeSelectingRequest = req;
             break;
           }
         }
 
-        if (activeRequest) {
-          // Добавляем дату к существующей заявке
-          activeRequest.dates.push(text);
+        if (activeSelectingRequest) {
+          activeSelectingRequest.dates.push(text);
           await sendMessage(userId, `Дата ${text} добавлена. Добавить ещё дату?`, getAddDateKeyboard());
         } else {
-          // Создаём новую заявку со статусом selecting_dates
           const requestId = generateRequestId(userId);
           const request = {
             requestId,
@@ -285,6 +348,10 @@ app.post('/callback', async (req, res) => {
           requests.set(requestId, request);
           await sendMessage(userId, `Вы выбрали дату: ${text}. Добавить ещё дату?`, getAddDateKeyboard());
         }
+      } else if (updateType === 'bot_started' || text.startsWith('/start')) {
+        await sendWelcome(userId);
+      } else if (text === '/dates' || /^(даты|свободные даты|занятость)$/i.test(text)) {
+        await sendBusyDates(userId);
       } else {
         await sendWelcome(userId);
       }
@@ -308,46 +375,43 @@ app.post('/callback', async (req, res) => {
         return;
       }
 
-      // Обработка кнопок главного меню
       if (payload === 'choose_date') {
-        // Начинаем процесс выбора дат
-        // Если уже есть активная заявка с selecting_dates, напоминаем
-        let activeRequest = null;
+        let activeSelectingRequest = null;
         for (let [id, req] of requests) {
           if (req.guestUserId === userId && req.status === 'selecting_dates') {
-            activeRequest = req;
+            activeSelectingRequest = req;
             break;
           }
         }
-        if (activeRequest) {
-          await sendMessage(userId, `У вас уже начат выбор дат. Текущие даты: ${activeRequest.dates.join(', ')}. Введите ещё дату или нажмите «Готово».`, getAddDateKeyboard());
+        if (activeSelectingRequest) {
+          await sendMessage(userId, `У вас уже начат выбор дат. Текущие даты: ${activeSelectingRequest.dates.join(', ')}. Введите ещё дату или нажмите «Готово».`, getAddDateKeyboard());
         } else {
           await sendMessage(userId, 'Введите желаемую дату в формате ДД.ММ.ГГГГ (например, 25.12.2026).');
         }
       } else if (payload === 'main_menu') {
         const menu = getMenuKeyboard();
         await sendMessage(userId, menu.text, menu.attachments);
+      } else if (payload === 'rules') {
+        // Новая обработка кнопки "Правила проживания"
+        await sendMessage(userId, getRulesText());
       } else if (payload === 'call_owner') {
         await sendMessage(userId, 'Вы можете позвонить владельцу: +7 (900) 000-00-00 (заглушка)');
       } else if (payload === 'message_owner') {
         await sendMessage(userId, 'Напишите сообщение владельцу, и я передам его.');
       } else if (payload === 'add_date') {
-        // Просим ввести ещё дату
         await sendMessage(userId, 'Введите ещё дату в формате ДД.ММ.ГГГГ:');
       } else if (payload === 'dates_done') {
-        // Пользователь завершил выбор дат
-        let activeRequest = null;
+        let activeSelectingRequest = null;
         for (let [id, req] of requests) {
           if (req.guestUserId === userId && req.status === 'selecting_dates') {
-            activeRequest = req;
+            activeSelectingRequest = req;
             break;
           }
         }
-        if (activeRequest && activeRequest.dates.length > 0) {
-          // Меняем статус на pending_confirmation и отправляем подтверждение
-          activeRequest.status = 'pending_confirmation';
-          const datesStr = activeRequest.dates.join(', ');
-          await sendMessage(userId, `Вы выбрали даты: ${datesStr}. Подтвердите бронь:`, getConfirmationKeyboard(activeRequest.requestId));
+        if (activeSelectingRequest && activeSelectingRequest.dates.length > 0) {
+          activeSelectingRequest.status = 'pending_confirmation';
+          const datesStr = activeSelectingRequest.dates.join(', ');
+          await sendMessage(userId, `Вы выбрали даты: ${datesStr}. Подтвердите бронь:`, getConfirmationKeyboard(activeSelectingRequest.requestId));
         } else {
           await sendMessage(userId, 'Нет выбранных дат. Начните выбор заново.', getMainKeyboard());
         }
@@ -355,11 +419,9 @@ app.post('/callback', async (req, res) => {
         const requestId = payload.replace('confirm_', '');
         const request = requests.get(requestId);
         if (request && request.status === 'pending_confirmation' && request.guestUserId === userId) {
-          // Резервируем даты на 30 минут
           request.status = 'reserved';
-          request.reservationExpires = Date.now() + 30 * 60 * 1000; // 30 минут
+          request.reservationExpires = Date.now() + 30 * 60 * 1000;
           console.log(`Заявка ${requestId} переведена в статус reserved`);
-
           const datesStr = request.dates.join(', ');
           await sendMessage(userId, `✅ Дата(ы) ${datesStr} зарезервированы на 30 минут. Пожалуйста, оформите договор за это время.`, getReservationKeyboard(requestId));
         } else {
@@ -369,7 +431,6 @@ app.post('/callback', async (req, res) => {
         const requestId = payload.replace('contract_', '');
         const request = requests.get(requestId);
         if (request && request.status === 'reserved' && request.guestUserId === userId) {
-          // Начинаем оформление договора: запрашиваем ФИО
           request.status = 'contract_in_progress';
           request.step = 'full_name';
           await sendMessage(userId, 'Для оформления договора, пожалуйста, укажите ваше полное ФИО (например, Иванов Иван Иванович):');
@@ -393,7 +454,6 @@ app.post('/callback', async (req, res) => {
         if (request && userId === request.ownerId && request.status === 'contract_signed') {
           request.status = 'paid';
           console.log(`Заявка ${requestId} оплачена`);
-
           const datesStr = request.dates.join(', ');
           const key = `KEY-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
           await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на даты ${datesStr} подтверждена.\n\nВаш электронный ключ: ${key}\n\nПриятного просмотра!`);
