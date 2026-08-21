@@ -44,6 +44,17 @@ function generateRequestId(userId) {
   return `${Date.now()}_${userId}`;
 }
 
+// ===== Функция для корректного парсинга даты из формата ДД.ММ.ГГГГ =====
+function parseDate(dateStr) {
+  const parts = dateStr.split('.');
+  if (parts.length !== 3) return new Date(NaN);
+  const day = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10) - 1;
+  const year = parseInt(parts[2], 10);
+  return new Date(year, month, day);
+}
+// ============================================================
+
 // Функция расчёта стоимости
 function calculatePrice(dates, guestsCount) {
   const stage = pricingConfig.current_stage;
@@ -54,13 +65,13 @@ function calculatePrice(dates, guestsCount) {
   let thirdGuestTotal = 0;
   let details = [];
 
-  const firstDate = new Date(dates[0]);
+  const firstDate = parseDate(dates[0]);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const daysBefore = Math.floor((firstDate - today) / (1000 * 60 * 60 * 24));
 
   dates.forEach(dateStr => {
-    const date = new Date(dateStr);
+    const date = parseDate(dateStr);
     const dayOfWeek = date.getDay();
     const isWeekend = (dayOfWeek === 5 || dayOfWeek === 6 || dayOfWeek === 0);
 
@@ -148,7 +159,7 @@ function calculatePrice(dates, guestsCount) {
   };
 }
 
-// ===== ВАЖНО: функция sendMessage =====
+// ===== Функция отправки сообщений =====
 async function sendMessage(userId, text, attachments = [], useMarkdown = true) {
   try {
     console.log(`Отправляю сообщение пользователю ${userId}: ${text}`);
@@ -241,7 +252,7 @@ function getMainKeyboard() {
   }];
 }
 
-// Меню (теперь с правилами)
+// Меню (с правилами)
 function getMenuKeyboard() {
   return [{
     type: 'inline_keyboard',
