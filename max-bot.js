@@ -93,7 +93,7 @@ async function sendBusyDates(userId) {
   await sendMessage(userId, responseText);
 }
 
-// Текст с правилами
+// Текст с полными правилами
 function getRulesText() {
   return '⚠️ *Важно знать:*\n' +
     '• Только для граждан РФ\n' +
@@ -104,7 +104,7 @@ function getRulesText() {
     '  - соблюдать чистоту';
 }
 
-// Главная клавиатура (теперь с кнопкой Правила)
+// Главная клавиатура (с кнопкой Правила)
 function getMainKeyboard() {
   return [{
     type: 'inline_keyboard',
@@ -187,9 +187,12 @@ function getAddDateKeyboard() {
   }];
 }
 
-// Отправка приветствия с главным меню
+// Отправка приветствия с главным меню (с важной информацией)
 async function sendWelcome(userId) {
   const text = 'Привет! Я бот Кинозала 4K. 👋\n\n' +
+               '⚠️ *Важно знать:*\n' +
+               '• Только для граждан РФ\n' +
+               '• Возраст от 21 года\n\n' +
                'Выберите действие ниже или напишите мне любое сообщение — я сразу открою меню.';
   await sendMessage(userId, text, getMainKeyboard());
 }
@@ -218,8 +221,39 @@ async function setCommands() {
   }
 }
 
+// Нормализация номера телефона к формату +7XXXXXXXXXX (10 цифр)
+function normalizePhone(phone) {
+  let digits = phone.replace(/\D/g, ''); // оставляем только цифры
+  // Если начинается с 8, меняем на 7
+  if (digits.startsWith('8')) {
+    digits = '7' + digits.slice(1);
+  }
+  // Если начинается с 9 (например, 9991234455), добавляем 7
+  if (digits.startsWith('9')) {
+    digits = '7' + digits;
+  }
+  // Если длина не 11 цифр или не начинается с 7, возвращаем null
+  if (digits.length !== 11 || !digits.startsWith('7')) {
+    return null;
+  }
+  return '+' + digits;
+}
+
 // Обработка шагов оформления договора
 async function processContractStep(userId, text, attachments, request) {
+  // Проверка на отмену резерва во время оформления договора
+  if (/^(отменить|отмена|отменить резерв)$/i.test(text.trim())) {
+    request.status = 'cancelled';
+    console.log(`Заявка ${request.requestId} отменена гостем во время оформления договора`);
+    // Уведомляем владельца, если заявка уже была подтверждена (reserved)
+    if (request.status === 'cancelled' && request.status !== 'pending_confirmation') {
+      await sendMessage(request.ownerId, `❌ Заявка на даты ${request.dates.join(', ')} отменена гостем.`);
+    }
+    await sendMessage(userId, 'Резерв отменён. Даты освобождены.');
+    requests.delete(request.requestId);
+    return;
+  }
+
   const step = request.step;
 
   if (step === 'full_name') {
@@ -229,12 +263,17 @@ async function processContractStep(userId, text, attachments, request) {
   } else if (step === 'passport') {
     request.contractData.passport = text.trim();
     request.step = 'phone';
-    await sendMessage(userId, 'Укажите номер телефона в формате +7XXXXXXXXXX:');
+    await sendMessage(userId, 'Укажите номер телефона (можно с +7, 8 или просто 10 цифр):');
   } else if (step === 'phone') {
-    request.contractData.phone = text.trim();
-    request.smsCode = '1234';
+    const normalized = normalizePhone(text);
+    if (!normalized) {
+      await sendMessage(userId, 'Неверный формат номера. Пожалуйста, введите номер ещё раз (например, +7 900 123-45-67):');
+      return; // остаёмся на шаге phone
+    }
+    request.contractData.phone = normalized;
+    request.smsCode = '1234'; // заглушка
     request.step = 'sms_code';
-    await sendMessage(userId, `На номер ${text.trim()} отправлен SMS-код (заглушка: ${request.smsCode}). Введите код:`);
+    await sendMessage(userId, `На номер ${normalized} отправлен SMS-код (заглушка: ${request.smsCode}). Введите код:`);
   } else if (step === 'sms_code') {
     if (text.trim() === request.smsCode) {
       request.step = 'selfie';
@@ -331,8 +370,13 @@ app.post('/callback', async (req, res) => {
         }
 
         if (activeSelectingRequest) {
-          activeSelectingRequest.dates.push(text);
-          await sendMessage(userId, `Дата ${text} добавлена. Добавить ещё дату?`, getAddDateKeyboard());
+          // Проверяем, нет ли уже такой даты
+          if (activeSelectingRequest.dates.includes(text)) {
+            await sendMessage(userId, `Дата ${text} уже выбрана. Добавьте другую дату или нажмите «Готово».`, getAddDateKeyboard());
+          } else {
+            activeSelectingRequest.dates.push(text);
+            await sendMessage(userId, `Дата ${text} добавлена. Добавить ещё дату?`, getAddDateKeyboard());
+          }
         } else {
           const requestId = generateRequestId(userId);
           const request = {
@@ -392,7 +436,6 @@ app.post('/callback', async (req, res) => {
         const menu = getMenuKeyboard();
         await sendMessage(userId, menu.text, menu.attachments);
       } else if (payload === 'rules') {
-        // Новая обработка кнопки "Правила проживания"
         await sendMessage(userId, getRulesText());
       } else if (payload === 'call_owner') {
         await sendMessage(userId, 'Вы можете позвонить владельцу: +7 (900) 000-00-00 (заглушка)');
@@ -443,7 +486,7 @@ app.post('/callback', async (req, res) => {
         if (request && request.status === 'reserved' && request.guestUserId === userId) {
           request.status = 'cancelled';
           console.log(`Резерв ${requestId} отменён гостем`);
-          await sendMessage(userId, 'Резерв отменён.');
+          await sendMessage(userId, 'Резерв отменён. Даты освобождены.');
           requests.delete(requestId);
         } else {
           await sendMessage(userId, 'Не удалось отменить резерв.');
