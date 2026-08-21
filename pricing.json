@@ -38,6 +38,11 @@
       { "min_nights": 5, "discount_per_night": 400 }
     ]
   },
+  "early_booking_discount": {
+    "enabled": true,
+    "min_days_before": 14,
+    "discount_percent": 10
+  },
   "min_price_per_night": 2500,
   "deposit": 1500
 }
