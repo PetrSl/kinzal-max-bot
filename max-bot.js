@@ -52,14 +52,12 @@ function calculatePrice(dates, guestsCount) {
   let baseTotal = 0;
   let discountTotal = 0;
   let thirdGuestTotal = 0;
-  let discountLabel = '';
+  let details = [];
 
   const firstDate = new Date(dates[0]);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const daysBefore = Math.floor((firstDate - today) / (1000 * 60 * 60 * 24));
-
-  let details = [];
 
   dates.forEach(dateStr => {
     const date = new Date(dateStr);
@@ -99,7 +97,7 @@ function calculatePrice(dates, guestsCount) {
     const maxDiscount = Math.max(0, basePerNight - pricingConfig.min_price_per_night);
     const discountPerNight = Math.min(basePerNight * pricingConfig.early_booking_discount.discount_percent / 100, maxDiscount);
     discountTotal = discountPerNight * dates.length;
-    discountLabel = `Скидка за раннее бронирование (${pricingConfig.early_booking_discount.discount_percent}%): -${discountTotal}₽ (${discountPerNight.toFixed(0)}₽/ночь)`;
+    details.push(`Скидка за раннее бронирование (${pricingConfig.early_booking_discount.discount_percent}%): -${discountTotal}₽ (${discountPerNight.toFixed(0)}₽/ночь)`);
   }
   // Оптовая скидка за длительность (только если бронь в ближайшие 13 дней)
   else if (daysBefore < 14 && pricingConfig.discounts?.enabled) {
@@ -116,12 +114,12 @@ function calculatePrice(dates, guestsCount) {
       const maxDiscount = Math.max(0, basePerNight - pricingConfig.min_price_per_night);
       const discountPerNight = Math.min(selectedRule.discount_per_night, maxDiscount);
       discountTotal = discountPerNight * nights;
-      discountLabel = `Скидка за длительность (${nights} ноч.): -${discountTotal}₽ (${discountPerNight}₽/ночь)`;
+      details.push(`Скидка за длительность (${nights} ноч.): -${discountTotal}₽ (${discountPerNight}₽/ночь)`);
     }
   }
 
   if (discountTotal > 0) {
-    details.push(discountLabel);
+    // уже добавлено
   } else {
     details.push('Скидка: 0₽');
   }
@@ -230,34 +228,32 @@ function getRulesText() {
     '  - соблюдать чистоту';
 }
 
+// Главная клавиатура (без правил)
 function getMainKeyboard() {
   return [{
     type: 'inline_keyboard',
     payload: {
       buttons: [
         [{ type: 'callback', text: '📅 Выбрать дату', payload: 'choose_date' }],
-        [{ type: 'callback', text: '📋 Меню', payload: 'main_menu' }],
-        [{ type: 'callback', text: '📜 Правила проживания', payload: 'rules' }]
+        [{ type: 'callback', text: '📋 Меню', payload: 'main_menu' }]
       ]
     }
   }];
 }
 
+// Меню (теперь с правилами)
 function getMenuKeyboard() {
-  const infoText = getRulesText();
-  return {
-    text: infoText,
-    attachments: [{
-      type: 'inline_keyboard',
-      payload: {
-        buttons: [
-          [{ type: 'callback', text: '📅 Выбрать дату', payload: 'choose_date' }],
-          [{ type: 'callback', text: '📞 Позвонить владельцу', payload: 'call_owner' }],
-          [{ type: 'callback', text: '💬 Написать владельцу', payload: 'message_owner' }]
-        ]
-      }
-    }]
-  };
+  return [{
+    type: 'inline_keyboard',
+    payload: {
+      buttons: [
+        [{ type: 'callback', text: '📅 Выбрать дату', payload: 'choose_date' }],
+        [{ type: 'callback', text: '📜 Правила проживания', payload: 'rules' }],
+        [{ type: 'callback', text: '📞 Позвонить владельцу', payload: 'call_owner' }],
+        [{ type: 'callback', text: '💬 Написать владельцу', payload: 'message_owner' }]
+      ]
+    }
+  }];
 }
 
 function getConfirmationKeyboard(requestId) {
@@ -671,8 +667,7 @@ app.post('/callback', async (req, res) => {
           await sendMessage(userId, 'Введите желаемую дату в формате ДД.ММ.ГГГГ (например, 25.12.2026).');
         }
       } else if (payload === 'main_menu') {
-        const menu = getMenuKeyboard();
-        await sendMessage(userId, menu.text, menu.attachments);
+        await sendMessage(userId, 'Меню:', getMenuKeyboard());
       } else if (payload === 'rules') {
         await sendMessage(userId, getRulesText());
       } else if (payload === 'call_owner') {
