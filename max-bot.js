@@ -27,7 +27,7 @@ let pricingConfig = {
   manual_override: {},
   discounts: { enabled: false, rules: [] },
   min_price_per_night: 2500,
-  deposit: 0
+  deposit: 1500
 };
 try {
   const raw = fs.readFileSync('./pricing.json', 'utf8');
@@ -54,19 +54,16 @@ function calculatePrice(dates, guestsCount) {
 
   dates.forEach(dateStr => {
     const date = new Date(dateStr);
-    const dayOfWeek = date.getDay(); // 0 = воскресенье, 6 = суббота
+    const dayOfWeek = date.getDay();
     const isWeekend = (dayOfWeek === 5 || dayOfWeek === 6 || dayOfWeek === 0);
 
     let price = 0;
     let type = '';
 
-    // 1. manual_override
     if (pricingConfig.manual_override && pricingConfig.manual_override[dateStr]) {
       price = pricingConfig.manual_override[dateStr];
       type = 'ручная цена';
-    }
-    // 2. holidays (только на этапе confident)
-    else if (stage === 'confident') {
+    } else if (stage === 'confident') {
       const holiday = pricingConfig.holidays.find(h => {
         const start = new Date(h.date_start);
         const end = new Date(h.date_end);
@@ -78,7 +75,6 @@ function calculatePrice(dates, guestsCount) {
       }
     }
 
-    // 3. обычные дни
     if (price === 0) {
       price = isWeekend ? stageConfig.weekend : stageConfig.weekday;
       type = isWeekend ? 'выходной' : 'будний';
@@ -88,7 +84,6 @@ function calculatePrice(dates, guestsCount) {
     details.push(`${dateStr}: ${price}₽ (${type})`);
   });
 
-  // Применяем скидку за длительность
   let appliedDiscountPerNight = 0;
   if (pricingConfig.discounts && pricingConfig.discounts.enabled) {
     const nights = dates.length;
@@ -137,7 +132,7 @@ function calculatePrice(dates, guestsCount) {
 async function sendMessage(userId, text, attachments = [], useMarkdown = true) {
   try {
     console.log(`Отправляю сообщение пользователю ${userId}: ${text}`);
-    await bot.api.sendMessageToUser(userId, text, {
+    await bot.api.sendMessageToUser(Number(userId), text, {
       attachments: attachments,
       format: useMarkdown ? 'markdown' : undefined
     });
@@ -350,6 +345,8 @@ function normalizePhone(phone) {
 }
 
 function isValidPassport(input) {
+  // Разрешены только цифры, пробелы, дефисы
+  if (!/^[\d\s-]+$/.test(input)) return false;
   const digits = input.replace(/\D/g, '');
   return digits.length === 10;
 }
@@ -393,7 +390,7 @@ function buildContractText(request) {
     `7. Согласие на обработку персональных данных\n` +
     `Данные хранятся на сервере на территории РФ и не передаются третьим лицам.\n\n` +
     `8. Расторжение\n` +
-    `При грубом нарушении правил Наймодатель вправе расторгнуть договор досрочно.\n\n` +
+    `При грубом нарушении правил Наймодатель вправе расторгнуть договор досрочно. Депозит в этом случае не возвращается.\n\n` +
     `9. Подписание\n` +
     `Договор подписывается путём обмена электронными сообщениями.\n\n` +
     `Для подписания нажмите кнопку «✅ Подтверждаю и подписываю».`;
@@ -416,7 +413,7 @@ async function sendOwnerInterruptedNotice(request) {
 async function checkExpiredRequests() {
   const now = Date.now();
   for (let [id, request] of requests) {
-    if ((request.status === 'reserved' || request.status === 'contract_in_progress' || request.status === 'contract_sent') && request.reservationExpires && request.reservationExpires < now) {
+    if ((request.status === 'reserved' || request.status === 'contract_in_progress' || request.status === 'contract_sent' || request.status === 'contract_awaiting_signature') && request.reservationExpires && request.reservationExpires < now) {
       console.log(`Заявка ${id} просрочена`);
       await sendOwnerInterruptedNotice(request);
       if (request.guestUserId) {
@@ -445,7 +442,7 @@ async function processContractStep(userId, text, attachments, request) {
     await sendMessage(userId, 'Спасибо! Теперь укажите серию и номер паспорта (например, 4510 123456):');
   } else if (step === 'passport') {
     if (!isValidPassport(text)) {
-      await sendMessage(userId, 'Неверный формат паспорта. Введите 10 цифр: 4 цифры серия и 6 цифр номер.');
+      await sendMessage(userId, 'Неверный формат паспорта. Введите 10 цифр: 4 цифры серия и 6 цифр номер (можно с пробелами или дефисами).');
       return;
     }
     request.contractData.passport = text.trim();
@@ -490,6 +487,25 @@ async function processContractStep(userId, text, attachments, request) {
       await sendMessage(userId, contractText, getContractSignKeyboard(request.requestId));
     } else {
       await sendMessage(userId, 'Пожалуйста, отправьте фото (селфи с паспортом).');
+    }
+  } else if (step === 'awaiting_phrase') {
+    // Проверка волшебной фразы
+    if (text && text.trim().length > 0) {
+      request.status = 'contract_signed';
+      request.step = null;
+      console.log(`Договор по заявке ${request.requestId} подписан гостем`);
+      const ownerText = `🔔 Гость подписал договор.\n\n` +
+        `Даты: ${request.dates.join(', ')}\n` +
+        `ФИО: ${request.contractData.fullName}\n` +
+        `Паспорт: ${request.contractData.passport}\n` +
+        `Телефон: ${request.contractData.phone}\n` +
+        `Количество гостей: ${request.contractData.guestsCount}\n` +
+        `Сумма к оплате: ${request.price.total} ₽\n\n` +
+        `Статус: ожидает оплаты`;
+      await sendMessage(request.ownerId, ownerText, getOwnerConfirmationKeyboard(request.requestId, request.dates.join(', ')));
+      await sendMessage(userId, '✅ Договор подписан! Ожидайте подтверждения оплаты от владельца.');
+    } else {
+      await sendMessage(userId, 'Пожалуйста, отправьте текст подтверждения.');
     }
   }
 }
@@ -539,7 +555,7 @@ app.post('/callback', async (req, res) => {
 
       let activeContractRequest = null;
       for (let [id, req] of requests) {
-        if (req.guestUserId === userId && req.status === 'contract_in_progress') {
+        if (req.guestUserId === userId && (req.status === 'contract_in_progress' || req.status === 'contract_awaiting_signature')) {
           activeContractRequest = req;
           break;
         }
@@ -571,7 +587,7 @@ app.post('/callback', async (req, res) => {
           const request = {
             requestId,
             guestUserId: userId,
-            ownerId: process.env.OWNER_ID,
+            ownerId: Number(process.env.OWNER_ID),
             dates: [text],
             status: 'selecting_dates',
             timestamp: Date.now(),
@@ -643,10 +659,7 @@ app.post('/callback', async (req, res) => {
         if (activeSelectingRequest && activeSelectingRequest.dates.length > 0) {
           activeSelectingRequest.status = 'pending_confirmation';
           const datesStr = activeSelectingRequest.dates.join(', ');
-
-          const price = calculatePrice(activeSelectingRequest.dates, 2); // предварительно для 2 гостей
-          const priceText = `💰 *Предварительный расчёт:*\n${price.details}\n\nИтого: ${price.total} ₽\n\nПодтвердите бронь:`;
-          await sendMessage(userId, priceText, getConfirmationKeyboard(activeSelectingRequest.requestId));
+          await sendMessage(userId, `Вы выбрали даты: ${datesStr}. Подтвердите бронь:`, getConfirmationKeyboard(activeSelectingRequest.requestId));
         } else {
           await sendMessage(userId, 'Нет выбранных дат. Начните выбор заново.', getMainKeyboard());
         }
@@ -662,7 +675,13 @@ app.post('/callback', async (req, res) => {
           const guestsCount = payload === 'guests_2' ? 2 : 3;
           activeContractRequest.contractData.guestsCount = guestsCount;
           activeContractRequest.step = 'selfie';
-          await sendMessage(userId, `Принято: ${guestsCount} гостя. Теперь отправьте селфи с паспортом в развернутом виде (фото).`);
+
+          // Расчёт окончательной стоимости
+          const price = calculatePrice(activeContractRequest.dates, guestsCount);
+          activeContractRequest.price = price;
+
+          const priceText = `💰 *Стоимость бронирования:*\n${price.details}\n\nИтого: ${price.total} ₽\n\nТеперь отправьте селфи с паспортом в развернутом виде (фото).`;
+          await sendMessage(userId, priceText);
         } else {
           await sendMessage(userId, 'Не удалось определить заявку для выбора гостей.');
         }
@@ -671,10 +690,10 @@ app.post('/callback', async (req, res) => {
         const request = requests.get(requestId);
         if (request && request.status === 'pending_confirmation' && request.guestUserId === userId) {
           request.status = 'reserved';
-          request.reservationExpires = Date.now() + 30 * 60 * 1000;
+          request.reservationExpires = Date.now() + 30 * 60 * 1000; // 30 минут
           console.log(`Заявка ${requestId} переведена в статус reserved`);
           const datesStr = request.dates.join(', ');
-          await sendMessage(userId, `✅ Дата(ы) ${datesStr} зарезервированы на 30 минут. Пожалуйста, оформите договор за это время.`, getReservationKeyboard(requestId));
+          await sendMessage(userId, `✅ Дата(ы) ${datesStr} зарезервированы на 30 минут. Пожалуйста, оформите договор и оплатите за это время.`, getReservationKeyboard(requestId));
         } else {
           await sendMessage(userId, 'Заявка не найдена или уже обработана.');
         }
@@ -704,18 +723,10 @@ app.post('/callback', async (req, res) => {
         const requestId = payload.replace('sign_contract_', '');
         const request = requests.get(requestId);
         if (request && request.status === 'contract_sent' && request.guestUserId === userId) {
-          request.status = 'contract_signed';
-          console.log(`Договор по заявке ${requestId} подписан гостем`);
-          const ownerText = `🔔 Гость подписал договор.\n\n` +
-            `Даты: ${request.dates.join(', ')}\n` +
-            `ФИО: ${request.contractData.fullName}\n` +
-            `Паспорт: ${request.contractData.passport}\n` +
-            `Телефон: ${request.contractData.phone}\n` +
-            `Количество гостей: ${request.contractData.guestsCount}\n` +
-            `Сумма к оплате: ${request.price.total} ₽\n\n` +
-            `Статус: ожидает оплаты`;
-          await sendMessage(request.ownerId, ownerText, getOwnerConfirmationKeyboard(requestId, request.dates.join(', ')));
-          await sendMessage(userId, '✅ Договор подписан! Ожидайте подтверждения оплаты от владельца.');
+          request.status = 'contract_awaiting_signature';
+          request.step = 'awaiting_phrase';
+          const phrase = `${request.contractData.fullName}, паспорт ${request.contractData.passport}, даты проживания ${request.dates.join(', ')}, с условиями договора краткосрочного найма ознакомлен и согласен. Оплату произвёл. Скан договора со своей подписью обязуюсь предоставить.`;
+          await sendMessage(userId, `Для завершения подписания отправьте мне сообщение:\n\n"${phrase}"`);
         } else {
           await sendMessage(userId, 'Не удалось подписать договор. Заявка не найдена или уже обработана.');
         }
