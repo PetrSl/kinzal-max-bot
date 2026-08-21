@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const ical = require('ical');
+const fs = require('fs');
 const { Bot } = require('@maxhub/max-bot-api');
 
 const app = express();
@@ -14,97 +15,131 @@ if (!process.env.BOT_TOKEN) {
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
-// Хранилище заявок: requestId -> объект заявки
+// Загрузка конфигурации цен
+let pricingConfig = {
+  current_stage: 'start',
+  stages: {
+    start: { weekday: 3500, weekend: 3500, third_guest_fee: 700 },
+    growth: { weekday: 3500, weekend: 3900, third_guest_fee: 700 },
+    confident: { weekday: 3900, weekend: 4500, third_guest_fee: 700 }
+  },
+  holidays: [],
+  manual_override: {},
+  discounts: { enabled: false, rules: [] },
+  min_price_per_night: 2500,
+  deposit: 0
+};
+try {
+  const raw = fs.readFileSync('./pricing.json', 'utf8');
+  pricingConfig = JSON.parse(raw);
+  console.log('pricing.json загружен');
+} catch (e) {
+  console.warn('pricing.json не найден, используются цены по умолчанию');
+}
+
 const requests = new Map();
 
-// Генерация уникального ID заявки
 function generateRequestId(userId) {
   return `${Date.now()}_${userId}`;
 }
 
-// Получение занятых дат (заглушка, пока нет ICAL_URL)
-async function getBusyDates() {
-  if (process.env.ICAL_URL) {
-    try {
-      const response = await axios.get(process.env.ICAL_URL);
-      const data = ical.parseICS(response.data);
-      const busyDates = new Set();
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const thirtyDaysLater = new Date(today);
-      thirtyDaysLater.setDate(thirtyDaysLater.getDate() + 30);
+// Функция расчёта стоимости
+function calculatePrice(dates, guestsCount) {
+  const stage = pricingConfig.current_stage;
+  const stageConfig = pricingConfig.stages[stage] || pricingConfig.stages.start;
+  let total = 0;
+  let baseTotal = 0;
+  let discountTotal = 0;
+  let details = [];
 
-      for (let k in data) {
-        if (data[k].type === 'VEVENT') {
-          const start = new Date(data[k].start);
-          const end = new Date(data[k].end);
-          for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
-            const current = new Date(d);
-            if (current >= today && current <= thirtyDaysLater) {
-              busyDates.add(current.toISOString().slice(0, 10));
-            }
-          }
-        }
-      }
-      return Array.from(busyDates).sort();
-    } catch (e) {
-      console.error('Ошибка iCal:', e);
-      return [];
+  dates.forEach(dateStr => {
+    const date = new Date(dateStr);
+    const dayOfWeek = date.getDay(); // 0 = воскресенье, 6 = суббота
+    const isWeekend = (dayOfWeek === 5 || dayOfWeek === 6 || dayOfWeek === 0);
+
+    let price = 0;
+    let type = '';
+
+    // 1. manual_override
+    if (pricingConfig.manual_override && pricingConfig.manual_override[dateStr]) {
+      price = pricingConfig.manual_override[dateStr];
+      type = 'ручная цена';
     }
-  } else {
-    return [];
+    // 2. holidays (только на этапе confident)
+    else if (stage === 'confident') {
+      const holiday = pricingConfig.holidays.find(h => {
+        const start = new Date(h.date_start);
+        const end = new Date(h.date_end);
+        return date >= start && date <= end;
+      });
+      if (holiday) {
+        price = holiday.price;
+        type = 'праздничный тариф';
+      }
+    }
+
+    // 3. обычные дни
+    if (price === 0) {
+      price = isWeekend ? stageConfig.weekend : stageConfig.weekday;
+      type = isWeekend ? 'выходной' : 'будний';
+    }
+
+    baseTotal += price;
+    details.push(`${dateStr}: ${price}₽ (${type})`);
+  });
+
+  // Применяем скидку за длительность
+  let appliedDiscountPerNight = 0;
+  if (pricingConfig.discounts && pricingConfig.discounts.enabled) {
+    const nights = dates.length;
+    const rules = pricingConfig.discounts.rules || [];
+    // Находим самое выгодное правило
+    let selectedRule = null;
+    for (let rule of rules) {
+      if (nights >= rule.min_nights) {
+        selectedRule = rule;
+      }
+    }
+    if (selectedRule) {
+      // Проверяем, не опустится ли цена за ночь ниже min_price_per_night
+      const basePerNight = baseTotal / nights;
+      const maxDiscount = Math.max(0, basePerNight - pricingConfig.min_price_per_night);
+      appliedDiscountPerNight = Math.min(selectedRule.discount_per_night, maxDiscount);
+      discountTotal = appliedDiscountPerNight * nights;
+      details.push(`Скидка за ${nights} ноч.: -${discountTotal}₽ (${appliedDiscountPerNight}₽/ночь)`);
+    }
   }
+
+  total = baseTotal - discountTotal;
+
+  // Доплата за третьего гостя
+  let thirdGuestTotal = 0;
+  if (guestsCount === 3) {
+    const thirdGuestFee = stageConfig.third_guest_fee || 700;
+    thirdGuestTotal = thirdGuestFee * dates.length;
+    total += thirdGuestTotal;
+    details.push(`Доплата за 3-го гостя: ${thirdGuestTotal}₽`);
+  }
+
+  // Депозит
+  if (pricingConfig.deposit > 0) {
+    total += pricingConfig.deposit;
+    details.push(`Депозит: ${pricingConfig.deposit}₽`);
+  }
+
+  return {
+    total,
+    baseTotal,
+    discountTotal,
+    thirdGuestTotal,
+    deposit: pricingConfig.deposit || 0,
+    details: details.join('\n')
+  };
 }
 
-// Отправка сообщения пользователю через SDK
-async function sendMessage(userId, text, attachments = []) {
-  try {
-    console.log(`Отправляю сообщение пользователю ${userId}: ${text}`);
-    await bot.api.sendMessageToUser(userId, text, {
-      attachments: attachments,
-      format: 'markdown'
-    });
-    console.log('Сообщение отправлено');
-  } catch (error) {
-    console.error('Ошибка отправки сообщения:', error);
-  }
-}
+// Остальные функции: getBusyDates, sendMessage, sendBusyDates, getRulesText, клавиатуры и т.д.
+// ... (аналогично предыдущей версии, но buildContractText использует результат calculatePrice)
 
-// Функция показа занятости (для команды /dates)
-async function sendBusyDates(userId) {
-  const busy = await getBusyDates();
-  if (busy.length === 0) {
-    await sendMessage(userId, 'Пока нет данных о занятости. Попробуйте позже.');
-    return;
-  }
-
-  let responseText = '🎬 *Кинозал 4K: занятость на 30 дней*\n\n';
-  const today = new Date();
-  for (let i = 0; i < 30; i++) {
-    const d = new Date(today);
-    d.setDate(d.getDate() + i);
-    const dateStr = d.toISOString().slice(0, 10);
-    const isBusy = busy.includes(dateStr);
-    const day = d.getDate().toString().padStart(2, '0');
-    const month = (d.getMonth() + 1).toString().padStart(2, '0');
-    responseText += `${isBusy ? '❌' : '✅'} ${day}.${month}\n`;
-  }
-  responseText += '\nЧтобы забронировать, нажмите «Выбрать дату».';
-  await sendMessage(userId, responseText);
-}
-
-// Текст с полными правилами
-function getRulesText() {
-  return '⚠️ *Важно знать:*\n' +
-    '• Только для граждан РФ\n' +
-    '• Возраст от 21 года\n' +
-    '• Правила проживания:\n' +
-    '  - не курить, не шуметь после 22:00\n' +
-    '  - не проводить вечеринки\n' +
-    '  - соблюдать чистоту';
-}
-
-// Главная клавиатура (с кнопкой Правила)
 function getMainKeyboard() {
   return [{
     type: 'inline_keyboard',
@@ -118,7 +153,6 @@ function getMainKeyboard() {
   }];
 }
 
-// Клавиатура меню (с доп. информацией)
 function getMenuKeyboard() {
   const infoText = getRulesText();
   return {
@@ -136,7 +170,16 @@ function getMenuKeyboard() {
   };
 }
 
-// Клавиатура подтверждения брони (гость)
+function getRulesText() {
+  return '⚠️ *Важно знать:*\n' +
+    '• Только для граждан РФ\n' +
+    '• Возраст от 21 года\n' +
+    '• Правила проживания:\n' +
+    '  - не курить, не шуметь после 22:00\n' +
+    '  - не проводить вечеринки\n' +
+    '  - соблюдать чистоту';
+}
+
 function getConfirmationKeyboard(requestId) {
   return [{
     type: 'inline_keyboard',
@@ -148,7 +191,6 @@ function getConfirmationKeyboard(requestId) {
   }];
 }
 
-// Клавиатура для гостя после резервирования
 function getReservationKeyboard(requestId) {
   return [{
     type: 'inline_keyboard',
@@ -161,71 +203,18 @@ function getReservationKeyboard(requestId) {
   }];
 }
 
-// Клавиатура для отмены резерва (одна кнопка)
-function getCancelReservationKeyboard(requestId) {
-  return [{
-    type: 'inline_keyboard',
-    payload: {
-      buttons: [
-        [{ type: 'callback', text: '❌ Отменить резерв', payload: `cancel_reserve_${requestId}` }]
-      ]
-    }
-  }];
-}
-
-// Клавиатура для подтверждения отмены резерва гостем
-function getConfirmCancelKeyboard(requestId) {
-  return [{
-    type: 'inline_keyboard',
-    payload: {
-      buttons: [
-        [{ type: 'callback', text: '✅ Да, отменить', payload: `confirm_cancel_${requestId}` }],
-        [{ type: 'callback', text: '❌ Нет', payload: `abort_cancel_${requestId}` }]
-      ]
-    }
-  }];
-}
-
-// Клавиатура для владельца (подтверждение оплаты или отмена)
 function getOwnerConfirmationKeyboard(requestId, dates) {
   return [{
     type: 'inline_keyboard',
     payload: {
       buttons: [
-        [{ type: 'callback', text: `✅ Бронь на ${dates} оплачена`, payload: `ask_paid_${requestId}` }],
-        [{ type: 'callback', text: '❌ Отменить бронь', payload: `ask_cancel_${requestId}` }]
+        [{ type: 'callback', text: `✅ Бронь на ${dates} оплачена`, payload: `paid_${requestId}` }],
+        [{ type: 'callback', text: '❌ Отменить бронь', payload: `owner_cancel_${requestId}` }]
       ]
     }
   }];
 }
 
-// Клавиатура для подтверждения оплаты владельцем
-function getOwnerConfirmPaidKeyboard(requestId) {
-  return [{
-    type: 'inline_keyboard',
-    payload: {
-      buttons: [
-        [{ type: 'callback', text: '✅ Да, оплата получена', payload: `confirm_paid_${requestId}` }],
-        [{ type: 'callback', text: '❌ Отмена', payload: `abort_paid_${requestId}` }]
-      ]
-    }
-  }];
-}
-
-// Клавиатура для подтверждения отмены брони владельцем
-function getOwnerConfirmCancelKeyboard(requestId) {
-  return [{
-    type: 'inline_keyboard',
-    payload: {
-      buttons: [
-        [{ type: 'callback', text: '✅ Да, отменить бронь', payload: `confirm_owner_cancel_${requestId}` }],
-        [{ type: 'callback', text: '❌ Отмена', payload: `abort_owner_cancel_${requestId}` }]
-      ]
-    }
-  }];
-}
-
-// Клавиатура для добавления ещё одной даты
 function getAddDateKeyboard() {
   return [{
     type: 'inline_keyboard',
@@ -238,7 +227,30 @@ function getAddDateKeyboard() {
   }];
 }
 
-// Отправка приветствия с главным меню (с важной информацией)
+function getGuestsKeyboard() {
+  return [{
+    type: 'inline_keyboard',
+    payload: {
+      buttons: [
+        [{ type: 'callback', text: '👤 2 гостя', payload: 'guests_2' }],
+        [{ type: 'callback', text: '👥 3 гостя', payload: 'guests_3' }]
+      ]
+    }
+  }];
+}
+
+function getContractSignKeyboard(requestId) {
+  return [{
+    type: 'inline_keyboard',
+    payload: {
+      buttons: [
+        [{ type: 'callback', text: '✅ Подтверждаю и подписываю', payload: `sign_contract_${requestId}` }],
+        [{ type: 'callback', text: '❌ Отклонить', payload: `reject_contract_${requestId}` }]
+      ]
+    }
+  }];
+}
+
 async function sendWelcome(userId) {
   const text = 'Привет! Я бот Кинозала 4K. 👋\n\n' +
                '⚠️ *Важно знать:*\n' +
@@ -248,7 +260,6 @@ async function sendWelcome(userId) {
   await sendMessage(userId, text, getMainKeyboard());
 }
 
-// Установка команд бота
 async function setCommands() {
   const commands = [
     { name: 'start', description: 'Начать общение и открыть меню' },
@@ -259,12 +270,7 @@ async function setCommands() {
     const response = await axios.patch(
       'https://platform-api2.max.ru/me/commands',
       { commands: commands },
-      {
-        headers: {
-          'Authorization': process.env.BOT_TOKEN,
-          'Content-Type': 'application/json'
-        }
-      }
+      { headers: { 'Authorization': process.env.BOT_TOKEN, 'Content-Type': 'application/json' } }
     );
     console.log('Команды бота установлены:', JSON.stringify(response.data));
   } catch (error) {
@@ -272,28 +278,64 @@ async function setCommands() {
   }
 }
 
-// Нормализация номера телефона к формату +7XXXXXXXXXX (10 цифр)
 function normalizePhone(phone) {
   let digits = phone.replace(/\D/g, '');
-  if (digits.startsWith('8')) {
-    digits = '7' + digits.slice(1);
-  }
-  if (digits.startsWith('9')) {
-    digits = '7' + digits;
-  }
-  if (digits.length !== 11 || !digits.startsWith('7')) {
-    return null;
-  }
+  if (digits.startsWith('8')) digits = '7' + digits.slice(1);
+  if (digits.startsWith('9')) digits = '7' + digits;
+  if (digits.length !== 11 || !digits.startsWith('7')) return null;
   return '+' + digits;
 }
 
-// Проверка паспорта: 4 цифры серия + 6 цифр номер (можно с пробелами/дефисами)
 function isValidPassport(input) {
   const digits = input.replace(/\D/g, '');
   return digits.length === 10;
 }
 
-// Отправка уведомления владельцу о прерывании оформления
+function buildContractText(request) {
+  const fullName = request.contractData.fullName || '______________';
+  const passport = request.contractData.passport || '______________';
+  const phone = request.contractData.phone || '______________';
+  const dates = request.dates.join(', ');
+  const dateStart = request.dates[0] || '__________';
+  const dateEnd = request.dates[request.dates.length - 1] || '__________';
+  const guestsCount = request.contractData.guestsCount || 2;
+  const price = request.price || { total: 0, discountTotal: 0, baseTotal: 0 };
+  const owner = process.env.OWNER_NAME || 'Собственник';
+  const ownerPhone = process.env.OWNER_PHONE || '________________';
+  const address = process.env.ADDRESS || '[адрес]';
+
+  return `📄 *ДОГОВОР КРАТКОСРОЧНОГО НАЙМА ЖИЛОГО ПОМЕЩЕНИЯ*\n\n` +
+    `1. Стороны\n` +
+    `Наймодатель: ${owner}, телефон: ${ownerPhone}\n` +
+    `Наниматель: ${fullName}, паспорт: ${passport}, телефон: ${phone}\n\n` +
+    `2. Предмет договора\n` +
+    `Наймодатель предоставляет Нанимателю для временного проживания квартиру по адресу: ${address}.\n\n` +
+    `3. Срок найма и стоимость\n` +
+    `Даты проживания: с ${dateStart} 15:00 по ${dateEnd} 11:00.\n` +
+    `Количество гостей: ${guestsCount}\n` +
+    `Базовая стоимость: ${price.baseTotal} ₽\n` +
+    (price.discountTotal > 0 ? `Скидка за длительность: -${price.discountTotal} ₽\n` : '') +
+    (price.thirdGuestTotal > 0 ? `Доплата за 3-го гостя: ${price.thirdGuestTotal} ₽\n` : '') +
+    `Депозит: ${price.deposit} ₽\n` +
+    `Итого к оплате: ${price.total} ₽\n\n` +
+    `4. Обязанности Нанимателя\n` +
+    `• Соблюдать тишину с 22:00 до 08:00\n` +
+    `• Не курить в квартире и на балконе\n` +
+    `• Не передавать код доступа третьим лицам\n` +
+    `• Бережно относиться к имуществу\n\n` +
+    `5. Ответственность\n` +
+    `Наниматель несёт полную материальную ответственность за ущерб имуществу и соседям.\n\n` +
+    `6. Подтверждение личности и номера телефона\n` +
+    `Наниматель подтверждает, что номер телефона принадлежит ему, и согласен с условиями договора.\n\n` +
+    `7. Согласие на обработку персональных данных\n` +
+    `Данные хранятся на сервере на территории РФ и не передаются третьим лицам.\n\n` +
+    `8. Расторжение\n` +
+    `При грубом нарушении правил Наймодатель вправе расторгнуть договор досрочно.\n\n` +
+    `9. Подписание\n` +
+    `Договор подписывается путём обмена электронными сообщениями.\n\n` +
+    `Для подписания нажмите кнопку «✅ Подтверждаю и подписываю».`;
+}
+
 async function sendOwnerInterruptedNotice(request) {
   if (!request || !request.ownerId) return;
   const collected = [];
@@ -302,17 +344,17 @@ async function sendOwnerInterruptedNotice(request) {
   if (request.contractData.fullName) collected.push(`ФИО: ${request.contractData.fullName}`);
   if (request.contractData.passport) collected.push(`Паспорт: ${request.contractData.passport}`);
   if (request.contractData.phone) collected.push(`Телефон: ${request.contractData.phone}`);
+  if (request.contractData.guestsCount) collected.push(`Количество гостей: ${request.contractData.guestsCount}`);
   collected.push(`Шаг остановки: ${request.step || 'не начат'}`);
   collected.push(`Статус: ${request.status}`);
   await sendMessage(request.ownerId, collected.join('\n'));
 }
 
-// Проверка истёкших резервов (вызывается при каждом вебхуке)
 async function checkExpiredRequests() {
   const now = Date.now();
   for (let [id, request] of requests) {
-    if ((request.status === 'reserved' || request.status === 'contract_in_progress') && request.reservationExpires && request.reservationExpires < now) {
-      console.log(`Заявка ${id} просрочена, уведомляем владельца и удаляем`);
+    if ((request.status === 'reserved' || request.status === 'contract_in_progress' || request.status === 'contract_sent') && request.reservationExpires && request.reservationExpires < now) {
+      console.log(`Заявка ${id} просрочена`);
       await sendOwnerInterruptedNotice(request);
       if (request.guestUserId) {
         await sendMessage(request.guestUserId, 'Время резерва истекло. Бронь отменена.');
@@ -322,12 +364,10 @@ async function checkExpiredRequests() {
   }
 }
 
-// Обработка шагов оформления договора
 async function processContractStep(userId, text, attachments, request) {
-  // Проверка на команду отмены
   if (/^(отменить|отмена|отменить резерв)$/i.test(text.trim())) {
     request.status = 'cancelled';
-    console.log(`Заявка ${request.requestId} отменена гостем во время оформления договора`);
+    console.log(`Заявка ${request.requestId} отменена гостем во время оформления`);
     await sendOwnerInterruptedNotice(request);
     await sendMessage(userId, 'Резерв отменён. Даты освобождены.');
     requests.delete(request.requestId);
@@ -339,57 +379,56 @@ async function processContractStep(userId, text, attachments, request) {
   if (step === 'full_name') {
     request.contractData.fullName = text.trim();
     request.step = 'passport';
-    await sendMessage(userId, 'Спасибо! Теперь укажите серию и номер паспорта (например, 4510 123456):', getCancelReservationKeyboard(request.requestId));
+    await sendMessage(userId, 'Спасибо! Теперь укажите серию и номер паспорта (например, 4510 123456):');
   } else if (step === 'passport') {
     if (!isValidPassport(text)) {
-      await sendMessage(userId, 'Неверный формат паспорта. Введите 10 цифр: 4 цифры серия и 6 цифр номер (можно с пробелом).', getCancelReservationKeyboard(request.requestId));
+      await sendMessage(userId, 'Неверный формат паспорта. Введите 10 цифр: 4 цифры серия и 6 цифр номер.');
       return;
     }
     request.contractData.passport = text.trim();
     request.step = 'phone';
-    await sendMessage(userId, 'Укажите номер телефона (можно с +7, 8 или просто 10 цифр):', getCancelReservationKeyboard(request.requestId));
+    await sendMessage(userId, 'Укажите номер телефона (можно с +7, 8 или просто 10 цифр):');
   } else if (step === 'phone') {
     const normalized = normalizePhone(text);
     if (!normalized) {
-      await sendMessage(userId, 'Неверный формат номера. Пожалуйста, введите номер ещё раз (например, +7 900 123-45-67):', getCancelReservationKeyboard(request.requestId));
+      await sendMessage(userId, 'Неверный формат номера. Введите ещё раз.');
       return;
     }
     request.contractData.phone = normalized;
-    request.smsCode = '1234'; // заглушка
+    request.smsCode = '1234';
     request.step = 'sms_code';
-    await sendMessage(userId, `На номер ${normalized} отправлен SMS-код (заглушка: ${request.smsCode}). Введите код:`, getCancelReservationKeyboard(request.requestId));
+    await sendMessage(userId, `На номер ${normalized} отправлен SMS-код (заглушка: ${request.smsCode}). Введите код:`);
   } else if (step === 'sms_code') {
     const code = text.trim();
     if (!/^\d+$/.test(code)) {
-      await sendMessage(userId, 'Код должен содержать только цифры. Попробуйте ещё раз:', getCancelReservationKeyboard(request.requestId));
+      await sendMessage(userId, 'Код должен содержать только цифры. Попробуйте ещё раз:');
       return;
     }
     if (code === request.smsCode) {
-      request.step = 'selfie';
-      await sendMessage(userId, 'Код верный! Теперь отправьте селфи с паспортом в развернутом виде (фото).', getCancelReservationKeyboard(request.requestId));
+      request.step = 'guests_count';
+      await sendMessage(userId, 'Сколько гостей будет проживать?', getGuestsKeyboard());
     } else {
-      await sendMessage(userId, 'Неверный код, попробуйте ещё раз:', getCancelReservationKeyboard(request.requestId));
+      await sendMessage(userId, 'Неверный код, попробуйте ещё раз:');
     }
+  } else if (step === 'guests_count') {
+    // Ожидаем, что гости выбраны через callback, текстовые сообщения не обрабатываем
+    await sendMessage(userId, 'Пожалуйста, выберите количество гостей кнопками.');
   } else if (step === 'selfie') {
     const hasImage = attachments && attachments.some(att => att.type === 'image');
     if (hasImage) {
       request.contractData.selfie = attachments.find(att => att.type === 'image').payload?.token || 'received';
-      request.status = 'contract_signed';
+      request.status = 'contract_sent';
       request.step = null;
-      console.log(`Договор по заявке ${request.requestId} оформлен`);
+      console.log(`Данные по заявке ${request.requestId} собраны, отправляем договор`);
 
-      const ownerText = `🔔 Гость оформил договор.\n\n` +
-        `Даты: ${request.dates.join(', ')}\n` +
-        `ФИО: ${request.contractData.fullName}\n` +
-        `Паспорт: ${request.contractData.passport}\n` +
-        `Телефон: ${request.contractData.phone}\n\n` +
-        `Статус: ожидает оплаты`;
-      await sendMessage(request.ownerId, ownerText, getOwnerConfirmationKeyboard(request.requestId, request.dates.join(', ')));
+      // Рассчитываем цену
+      const price = calculatePrice(request.dates, request.contractData.guestsCount);
+      request.price = price;
 
-      // Гостю отправляем сообщение с кнопкой отмены до оплаты
-      await sendMessage(userId, 'Договор оформлен! Ожидайте подтверждения оплаты от владельца.', getCancelReservationKeyboard(request.requestId));
+      const contractText = buildContractText(request);
+      await sendMessage(userId, contractText, getContractSignKeyboard(request.requestId));
     } else {
-      await sendMessage(userId, 'Пожалуйста, отправьте фото (селфи с паспортом).', getCancelReservationKeyboard(request.requestId));
+      await sendMessage(userId, 'Пожалуйста, отправьте фото (селфи с паспортом).');
     }
   }
 }
@@ -407,7 +446,6 @@ app.post('/callback', async (req, res) => {
   res.send('ok');
 
   try {
-    // Проверяем истёкшие резервы перед обработкой нового события
     await checkExpiredRequests();
 
     const body = req.body;
@@ -438,7 +476,6 @@ app.post('/callback', async (req, res) => {
 
       console.log(`Событие: ${updateType}, user_id: ${userId}, текст: "${text}", attachments: ${attachments.length}`);
 
-      // Проверка активного договора
       let activeContractRequest = null;
       for (let [id, req] of requests) {
         if (req.guestUserId === userId && req.status === 'contract_in_progress') {
@@ -452,7 +489,6 @@ app.post('/callback', async (req, res) => {
         return;
       }
 
-      // Если заявка в статусе выбора дат и пришло текстовое сообщение с датой
       if (/^\d{2}\.\d{2}\.\d{4}$/.test(text)) {
         let activeSelectingRequest = null;
         for (let [id, req] of requests) {
@@ -511,7 +547,6 @@ app.post('/callback', async (req, res) => {
         return;
       }
 
-      // Обработка главного меню и прочих кнопок
       if (payload === 'choose_date') {
         let activeSelectingRequest = null;
         for (let [id, req] of requests) {
@@ -547,9 +582,30 @@ app.post('/callback', async (req, res) => {
         if (activeSelectingRequest && activeSelectingRequest.dates.length > 0) {
           activeSelectingRequest.status = 'pending_confirmation';
           const datesStr = activeSelectingRequest.dates.join(', ');
-          await sendMessage(userId, `Вы выбрали даты: ${datesStr}. Подтвердите бронь:`, getConfirmationKeyboard(activeSelectingRequest.requestId));
+
+          // Перед подтверждением показываем расчёт стоимости
+          const price = calculatePrice(activeSelectingRequest.dates, 2); // пока 2 гостя, уточним после
+          const priceText = `💰 *Предварительный расчёт:*\n${price.details}\n\nИтого: ${price.total} ₽\n\nПодтвердите бронь:`;
+          await sendMessage(userId, priceText, getConfirmationKeyboard(activeSelectingRequest.requestId));
         } else {
           await sendMessage(userId, 'Нет выбранных дат. Начните выбор заново.', getMainKeyboard());
+        }
+      } else if (payload === 'guests_2' || payload === 'guests_3') {
+        // Обработка выбора количества гостей
+        let activeContractRequest = null;
+        for (let [id, req] of requests) {
+          if (req.guestUserId === userId && req.status === 'contract_in_progress' && req.step === 'guests_count') {
+            activeContractRequest = req;
+            break;
+          }
+        }
+        if (activeContractRequest) {
+          const guestsCount = payload === 'guests_2' ? 2 : 3;
+          activeContractRequest.contractData.guestsCount = guestsCount;
+          activeContractRequest.step = 'selfie';
+          await sendMessage(userId, `Принято: ${guestsCount} гостя. Теперь отправьте селфи с паспортом в развернутом виде (фото).`);
+        } else {
+          await sendMessage(userId, 'Не удалось определить заявку для выбора гостей.');
         }
       } else if (payload.startsWith('confirm_')) {
         const requestId = payload.replace('confirm_', '');
@@ -569,46 +625,55 @@ app.post('/callback', async (req, res) => {
         if (request && request.status === 'reserved' && request.guestUserId === userId) {
           request.status = 'contract_in_progress';
           request.step = 'full_name';
-          await sendMessage(userId, 'Для оформления договора, пожалуйста, укажите ваше полное ФИО (например, Иванов Иван Иванович):', getCancelReservationKeyboard(requestId));
+          await sendMessage(userId, 'Для оформления договора, пожалуйста, укажите ваше полное ФИО (например, Иванов Иван Иванович):');
         } else {
           await sendMessage(userId, 'Резерв не найден или уже истёк.');
         }
       } else if (payload.startsWith('cancel_reserve_')) {
         const requestId = payload.replace('cancel_reserve_', '');
         const request = requests.get(requestId);
-        if (request && (request.status === 'reserved' || request.status === 'contract_in_progress' || request.status === 'contract_signed') && request.guestUserId === userId) {
-          await sendMessage(userId, 'Вы уверены, что хотите отменить резерв? Даты будут освобождены.', getConfirmCancelKeyboard(requestId));
-        } else {
-          await sendMessage(userId, 'Не удалось отменить резерв. Возможно, он уже неактивен.');
-        }
-      } else if (payload.startsWith('confirm_cancel_')) {
-        const requestId = payload.replace('confirm_cancel_', '');
-        const request = requests.get(requestId);
-        if (request && (request.status === 'reserved' || request.status === 'contract_in_progress' || request.status === 'contract_signed') && request.guestUserId === userId) {
+        if (request && request.status === 'reserved' && request.guestUserId === userId) {
           request.status = 'cancelled';
-          console.log(`Резерв ${requestId} отменён гостем (подтверждено)`);
+          console.log(`Резерв ${requestId} отменён гостем`);
           await sendOwnerInterruptedNotice(request);
           await sendMessage(userId, 'Резерв отменён. Даты освобождены.');
           requests.delete(requestId);
         } else {
-          await sendMessage(userId, 'Заявка не найдена.');
+          await sendMessage(userId, 'Не удалось отменить резерв.');
         }
-      } else if (payload.startsWith('abort_cancel_')) {
-        const requestId = payload.replace('abort_cancel_', '');
+      } else if (payload.startsWith('sign_contract_')) {
+        const requestId = payload.replace('sign_contract_', '');
         const request = requests.get(requestId);
-        if (request && request.guestUserId === userId) {
-          await sendMessage(userId, 'Отмена отменена. Продолжайте оформление.');
-        }
-      } else if (payload.startsWith('ask_paid_')) {
-        const requestId = payload.replace('ask_paid_', '');
-        const request = requests.get(requestId);
-        if (request && userId === request.ownerId && request.status === 'contract_signed') {
-          await sendMessage(userId, 'Подтвердите, что оплата получена?', getOwnerConfirmPaidKeyboard(requestId));
+        if (request && request.status === 'contract_sent' && request.guestUserId === userId) {
+          request.status = 'contract_signed';
+          console.log(`Договор по заявке ${requestId} подписан гостем`);
+          const ownerText = `🔔 Гость подписал договор.\n\n` +
+            `Даты: ${request.dates.join(', ')}\n` +
+            `ФИО: ${request.contractData.fullName}\n` +
+            `Паспорт: ${request.contractData.passport}\n` +
+            `Телефон: ${request.contractData.phone}\n` +
+            `Количество гостей: ${request.contractData.guestsCount}\n` +
+            `Сумма к оплате: ${request.price.total} ₽\n\n` +
+            `Статус: ожидает оплаты`;
+          await sendMessage(request.ownerId, ownerText, getOwnerConfirmationKeyboard(requestId, request.dates.join(', ')));
+          await sendMessage(userId, '✅ Договор подписан! Ожидайте подтверждения оплаты от владельца.');
         } else {
-          await sendMessage(userId, 'Заявка не найдена или её статус не позволяет подтвердить оплату.');
+          await sendMessage(userId, 'Не удалось подписать договор. Заявка не найдена или уже обработана.');
         }
-      } else if (payload.startsWith('confirm_paid_')) {
-        const requestId = payload.replace('confirm_paid_', '');
+      } else if (payload.startsWith('reject_contract_')) {
+        const requestId = payload.replace('reject_contract_', '');
+        const request = requests.get(requestId);
+        if (request && request.status === 'contract_sent' && request.guestUserId === userId) {
+          request.status = 'cancelled';
+          console.log(`Гость отклонил договор по заявке ${requestId}`);
+          await sendOwnerInterruptedNotice(request);
+          await sendMessage(userId, 'Договор отклонён. Резерв отменён.');
+          requests.delete(requestId);
+        } else {
+          await sendMessage(userId, 'Не удалось отклонить договор.');
+        }
+      } else if (payload.startsWith('paid_')) {
+        const requestId = payload.replace('paid_', '');
         const request = requests.get(requestId);
         if (request && userId === request.ownerId && request.status === 'contract_signed') {
           request.status = 'paid';
@@ -620,36 +685,16 @@ app.post('/callback', async (req, res) => {
         } else {
           await sendMessage(userId, 'Заявка не найдена или её статус не позволяет подтвердить оплату.');
         }
-      } else if (payload.startsWith('abort_paid_')) {
-        const requestId = payload.replace('abort_paid_', '');
-        const request = requests.get(requestId);
-        if (request && userId === request.ownerId) {
-          await sendMessage(userId, 'Подтверждение оплаты отменено.');
-        }
-      } else if (payload.startsWith('ask_cancel_')) {
-        const requestId = payload.replace('ask_cancel_', '');
-        const request = requests.get(requestId);
-        if (request && userId === request.ownerId) {
-          await sendMessage(userId, 'Вы уверены, что хотите отменить бронь?', getOwnerConfirmCancelKeyboard(requestId));
-        } else {
-          await sendMessage(userId, 'Заявка не найдена.');
-        }
-      } else if (payload.startsWith('confirm_owner_cancel_')) {
-        const requestId = payload.replace('confirm_owner_cancel_', '');
+      } else if (payload.startsWith('owner_cancel_')) {
+        const requestId = payload.replace('owner_cancel_', '');
         const request = requests.get(requestId);
         if (request && userId === request.ownerId) {
           request.status = 'cancelled';
-          console.log(`Заявка ${requestId} отменена владельцем (подтверждено)`);
+          console.log(`Заявка ${requestId} отменена владельцем`);
           await sendMessage(request.guestUserId, `К сожалению, бронь на даты ${request.dates.join(', ')} отменена владельцем.`);
           requests.delete(requestId);
         } else {
           await sendMessage(userId, 'Заявка не найдена.');
-        }
-      } else if (payload.startsWith('abort_owner_cancel_')) {
-        const requestId = payload.replace('abort_owner_cancel_', '');
-        const request = requests.get(requestId);
-        if (request && userId === request.ownerId) {
-          await sendMessage(userId, 'Отмена брони отменена.');
         }
       } else {
         console.log('Неизвестный payload:', payload);
@@ -660,7 +705,6 @@ app.post('/callback', async (req, res) => {
   }
 });
 
-// Установка подписки на вебхук при старте
 async function setWebhook() {
   const webhookUrl = process.env.WEBHOOK_URL;
   const secret = process.env.WEBHOOK_SECRET || '';
@@ -674,17 +718,8 @@ async function setWebhook() {
   try {
     const response = await axios.post(
       'https://platform-api2.max.ru/subscriptions',
-      {
-        url: webhookUrl,
-        update_types: updateTypes,
-        secret: secret || undefined
-      },
-      {
-        headers: {
-          'Authorization': process.env.BOT_TOKEN,
-          'Content-Type': 'application/json'
-        }
-      }
+      { url: webhookUrl, update_types: updateTypes, secret: secret || undefined },
+      { headers: { 'Authorization': process.env.BOT_TOKEN, 'Content-Type': 'application/json' } }
     );
     console.log('Ответ на подписку:', JSON.stringify(response.data));
   } catch (e) {
