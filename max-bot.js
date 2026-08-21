@@ -690,7 +690,7 @@ app.post('/callback', async (req, res) => {
         const request = requests.get(requestId);
         if (request && request.status === 'pending_confirmation' && request.guestUserId === userId) {
           request.status = 'reserved';
-          request.reservationExpires = Date.now() + 30 * 60 * 1000; // 30 минут
+          request.reservationExpires = Date.now() + 60 * 60 * 1000; // 60 минут
           console.log(`Заявка ${requestId} переведена в статус reserved`);
           const datesStr = request.dates.join(', ');
           await sendMessage(userId, `✅ Дата(ы) ${datesStr} зарезервированы на 30 минут. Пожалуйста, оформите договор и оплатите за это время.`, getReservationKeyboard(requestId));
