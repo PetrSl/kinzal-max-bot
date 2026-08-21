@@ -1,11 +1,34 @@
 {
   "current_stage": "start",
   "stages": {
-    "start": { "weekday": 3500, "weekend": 3500, "third_guest_fee": 700 },
-    "growth": { "weekday": 3500, "weekend": 3900, "third_guest_fee": 700 },
-    "confident": { "weekday": 3900, "weekend": 4500, "third_guest_fee": 700 }
+    "start": {
+      "weekday": 3500,
+      "weekend": 3500,
+      "third_guest_fee": 700
+    },
+    "growth": {
+      "weekday": 3500,
+      "weekend": 3900,
+      "third_guest_fee": 700
+    },
+    "confident": {
+      "weekday": 3900,
+      "weekend": 4500,
+      "third_guest_fee": 700
+    }
   },
-  "holidays": [ ... ],
+  "holidays": [
+    { "date_start": "2026-01-01", "date_end": "2026-01-10", "price": 5500 },
+    { "date_start": "2026-02-21", "date_end": "2026-02-23", "price": 4900 },
+    { "date_start": "2026-03-06", "date_end": "2026-03-08", "price": 4900 },
+    { "date_start": "2026-05-01", "date_end": "2026-05-03", "price": 4900 },
+    { "date_start": "2026-05-08", "date_end": "2026-05-10", "price": 5500 },
+    { "date_start": "2026-06-12", "date_end": "2026-06-14", "price": 4900 },
+    { "date_start": "2026-06-20", "date_end": "2026-06-28", "price": 5500 },
+    { "date_start": "2026-07-04", "date_end": "2026-07-05", "price": 4900 },
+    { "date_start": "2026-10-31", "date_end": "2026-11-04", "price": 4900 },
+    { "date_start": "2026-12-25", "date_end": "2026-12-31", "price": 5500 }
+  ],
   "manual_override": {},
   "discounts": {
     "enabled": true,
