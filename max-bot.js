@@ -26,6 +26,7 @@ let pricingConfig = {
   holidays: [],
   manual_override: {},
   discounts: { enabled: false, rules: [] },
+  early_booking_discount: { enabled: false, min_days_before: 14, discount_percent: 10 },
   min_price_per_night: 2500,
   deposit: 1500
 };
@@ -52,6 +53,12 @@ function calculatePrice(dates, guestsCount) {
   let discountTotal = 0;
   let details = [];
 
+  // Определяем количество дней до заезда
+  const firstDate = new Date(dates[0]);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daysBefore = Math.floor((firstDate - today) / (1000 * 60 * 60 * 24));
+
   dates.forEach(dateStr => {
     const date = new Date(dateStr);
     const dayOfWeek = date.getDay();
@@ -60,10 +67,13 @@ function calculatePrice(dates, guestsCount) {
     let price = 0;
     let type = '';
 
+    // 1. manual_override
     if (pricingConfig.manual_override && pricingConfig.manual_override[dateStr]) {
       price = pricingConfig.manual_override[dateStr];
       type = 'ручная цена';
-    } else if (stage === 'confident') {
+    }
+    // 2. holidays (только на этапе confident)
+    else if (stage === 'confident') {
       const holiday = pricingConfig.holidays.find(h => {
         const start = new Date(h.date_start);
         const end = new Date(h.date_end);
@@ -75,6 +85,7 @@ function calculatePrice(dates, guestsCount) {
       }
     }
 
+    // 3. обычные дни
     if (price === 0) {
       price = isWeekend ? stageConfig.weekend : stageConfig.weekday;
       type = isWeekend ? 'выходной' : 'будний';
@@ -84,8 +95,21 @@ function calculatePrice(dates, guestsCount) {
     details.push(`${dateStr}: ${price}₽ (${type})`);
   });
 
+  // Применяем скидки
   let appliedDiscountPerNight = 0;
-  if (pricingConfig.discounts && pricingConfig.discounts.enabled) {
+  let discountLabel = '';
+
+  // Проверяем раннее бронирование
+  if (pricingConfig.early_booking_discount && pricingConfig.early_booking_discount.enabled && daysBefore >= pricingConfig.early_booking_discount.min_days_before) {
+    const basePerNight = baseTotal / dates.length;
+    const maxDiscount = Math.max(0, basePerNight - pricingConfig.min_price_per_night);
+    appliedDiscountPerNight = Math.min(basePerNight * pricingConfig.early_booking_discount.discount_percent / 100, maxDiscount);
+    discountTotal = appliedDiscountPerNight * dates.length;
+    discountLabel = `Скидка за раннее бронирование (${pricingConfig.early_booking_discount.discount_percent}%): -${discountTotal}₽ (${appliedDiscountPerNight}₽/ночь)`;
+    details.push(discountLabel);
+  }
+  // Иначе применяем оптовую скидку за длительность, только если бронь в ближайшие 13 дней
+  else if (daysBefore < 14 && pricingConfig.discounts && pricingConfig.discounts.enabled) {
     const nights = dates.length;
     const rules = pricingConfig.discounts.rules || [];
     let selectedRule = null;
@@ -99,7 +123,8 @@ function calculatePrice(dates, guestsCount) {
       const maxDiscount = Math.max(0, basePerNight - pricingConfig.min_price_per_night);
       appliedDiscountPerNight = Math.min(selectedRule.discount_per_night, maxDiscount);
       discountTotal = appliedDiscountPerNight * nights;
-      details.push(`Скидка за ${nights} ноч.: -${discountTotal}₽ (${appliedDiscountPerNight}₽/ночь)`);
+      discountLabel = `Скидка за длительность (${nights} ноч.): -${discountTotal}₽ (${appliedDiscountPerNight}₽/ночь)`;
+      details.push(discountLabel);
     }
   }
 
@@ -345,7 +370,6 @@ function normalizePhone(phone) {
 }
 
 function isValidPassport(input) {
-  // Разрешены только цифры, пробелы, дефисы
   if (!/^[\d\s-]+$/.test(input)) return false;
   const digits = input.replace(/\D/g, '');
   return digits.length === 10;
@@ -374,7 +398,7 @@ function buildContractText(request) {
     `Даты проживания: с ${dateStart} 15:00 по ${dateEnd} 11:00.\n` +
     `Количество гостей: ${guestsCount}\n` +
     `Базовая стоимость: ${price.baseTotal} ₽\n` +
-    (price.discountTotal > 0 ? `Скидка за длительность: -${price.discountTotal} ₽\n` : '') +
+    (price.discountTotal > 0 ? `Скидка: -${price.discountTotal} ₽\n` : '') +
     (price.thirdGuestTotal > 0 ? `Доплата за 3-го гостя: ${price.thirdGuestTotal} ₽\n` : '') +
     `Депозит: ${price.deposit} ₽\n` +
     `Итого к оплате: ${price.total} ₽\n\n` +
@@ -390,7 +414,7 @@ function buildContractText(request) {
     `7. Согласие на обработку персональных данных\n` +
     `Данные хранятся на сервере на территории РФ и не передаются третьим лицам.\n\n` +
     `8. Расторжение\n` +
-    `При грубом нарушении правил Наймодатель вправе расторгнуть договор досрочно. Депозит в этом случае не возвращается.\n\n` +
+    `При грубом нарушении правил Наймодатель вправе расторгнуть договор досрочно. Депозит в этом случае не возвращается. При отмене брони по инициативе Нанимателя предоплата не возвращается.\n\n` +
     `9. Подписание\n` +
     `Договор подписывается путём обмена электронными сообщениями.\n\n` +
     `Для подписания нажмите кнопку «✅ Подтверждаю и подписываю».`;
@@ -473,9 +497,11 @@ async function processContractStep(userId, text, attachments, request) {
   } else if (step === 'guests_count') {
     await sendMessage(userId, 'Пожалуйста, выберите количество гостей кнопками.');
   } else if (step === 'selfie') {
-    const hasImage = attachments && attachments.some(att => att.type === 'image');
-    if (hasImage) {
-      request.contractData.selfie = attachments.find(att => att.type === 'image').payload?.token || 'received';
+    // Принимаем любое вложение (не только image)
+    const hasAttachment = attachments && attachments.length > 0;
+    if (hasAttachment) {
+      const imageAttachment = attachments.find(att => att.type === 'image') || attachments[0];
+      request.contractData.selfie = imageAttachment.payload?.token || imageAttachment.payload?.url || 'received';
       request.status = 'contract_sent';
       request.step = null;
       console.log(`Данные по заявке ${request.requestId} собраны, отправляем договор`);
@@ -489,7 +515,6 @@ async function processContractStep(userId, text, attachments, request) {
       await sendMessage(userId, 'Пожалуйста, отправьте фото (селфи с паспортом).');
     }
   } else if (step === 'awaiting_phrase') {
-    // Проверка волшебной фразы
     if (text && text.trim().length > 0) {
       request.status = 'contract_signed';
       request.step = null;
@@ -693,7 +718,7 @@ app.post('/callback', async (req, res) => {
           request.reservationExpires = Date.now() + 60 * 60 * 1000; // 60 минут
           console.log(`Заявка ${requestId} переведена в статус reserved`);
           const datesStr = request.dates.join(', ');
-          await sendMessage(userId, `✅ Дата(ы) ${datesStr} зарезервированы на 30 минут. Пожалуйста, оформите договор и оплатите за это время.`, getReservationKeyboard(requestId));
+          await sendMessage(userId, `✅ Дата(ы) ${datesStr} зарезервированы на 60 минут. Пожалуйста, оформите договор и оплатите за это время.`, getReservationKeyboard(requestId));
         } else {
           await sendMessage(userId, 'Заявка не найдена или уже обработана.');
         }
@@ -750,7 +775,7 @@ app.post('/callback', async (req, res) => {
           console.log(`Заявка ${requestId} оплачена`);
           const datesStr = request.dates.join(', ');
           const key = `KEY-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-          await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на даты ${datesStr} подтверждена.\n\nВаш электронный ключ: ${key}\n\nПриятного просмотра!`);
+          await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на даты ${datesStr} подтверждена.\n\nВаш электронный ключ: ${key}\n\nСмотри кино. Спи крепко.`);
           requests.delete(requestId);
         } else {
           await sendMessage(userId, 'Заявка не найдена или её статус не позволяет подтвердить оплату.');
