@@ -793,8 +793,16 @@ app.post('/callback', async (req, res) => {
           const price = calculatePrice(activeContractRequest.dates, guestsCount);
           activeContractRequest.price = price;
 
-          const priceText = `💰 *Стоимость бронирования:*\n${price.details}\n\nИтого: ${price.total} ₽\n\nТеперь отправьте селфи с паспортом в развернутом виде (фото). После проверки Вам будет отправлен договор на подписание.`;
-          await sendMessage(userId, priceText);
+          const priceText = `💰 *Стоимость бронирования:*\n${price.details}\n\nИтого: ${price.total} ₽\n\n📸 *Селфи с паспортом*\n\nТеперь отправьте селфи с паспортом в развернутом виде (фото). После проверки Вам будет отправлен договор на подписание.`;
+          const selfieCancelKeyboard = [{
+            type: 'inline_keyboard',
+            payload: {
+              buttons: [
+                [{ type: 'callback', text: '❌ Отменить бронь', payload: `cancel_reserve_${activeContractRequest.requestId}` }]
+              ]
+            }
+          }];
+          await sendMessage(userId, priceText, selfieCancelKeyboard);
         } else {
           await sendMessage(userId, 'Не удалось определить заявку для выбора гостей.');
         }
@@ -823,9 +831,9 @@ app.post('/callback', async (req, res) => {
       } else if (payload.startsWith('cancel_reserve_')) {
         const requestId = payload.replace('cancel_reserve_', '');
         const request = requests.get(requestId);
-        if (request && request.status === 'reserved' && request.guestUserId === userId) {
+        if (request && request.guestUserId === userId && (request.status === 'reserved' || request.status === 'contract_in_progress')) {
           request.status = 'cancelled';
-          console.log(`Резерв ${requestId} отменён гостем`);
+          console.log(`Заявка ${requestId} отменена гостем`);
           await sendOwnerInterruptedNotice(request);
           await sendMessage(userId, 'Резерв отменён. Даты освобождены.');
           requests.delete(requestId);
@@ -892,7 +900,7 @@ app.post('/callback', async (req, res) => {
           console.log(`Заявка ${requestId} оплачена`);
           const datesStr = request.dates.join(', ');
           const key = `KEY-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-          await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на даты ${datesStr} подтверждена.\n\nВаш электронный ключ: ${key}\n\nСмотри кино. Спи крепко.`);
+          await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на даты ${datesStr} подтверждена.\n\nВаш электронный ключ: ${key}\n\nПриятного просмотра!`);
 
           // Карточка заказа
           const cardText = `📇 *Карточка заказа*\n` +
