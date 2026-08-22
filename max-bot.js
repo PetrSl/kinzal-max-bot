@@ -50,6 +50,10 @@ function generateRequestId(userId) {
   return `${Date.now()}_${userId}`;
 }
 
+function getShortId(requestId) {
+  return requestId.slice(-6).toUpperCase();
+}
+
 // ===== Функция для корректного парсинга даты из формата ДД.ММ.ГГГГ =====
 function parseDate(dateStr) {
   const parts = dateStr.split('.');
@@ -296,6 +300,20 @@ function getReservationKeyboard(requestId) {
   }];
 }
 
+function getOwnerReviewKeyboard(requestId, guestPhone) {
+  return [{
+    type: 'inline_keyboard',
+    payload: {
+      buttons: [
+        [{ type: 'callback', text: '✅ Отправить договор', payload: `approve_contract_${requestId}` }],
+        [{ type: 'callback', text: '📞 Позвонить', payload: `call_guest_${requestId}` }],
+        [{ type: 'callback', text: '💬 Написать', payload: `message_guest_${requestId}` }],
+        [{ type: 'callback', text: '❌ Отменить бронь', payload: `owner_cancel_${requestId}` }]
+      ]
+    }
+  }];
+}
+
 function getOwnerConfirmationKeyboard(requestId, dates) {
   return [{
     type: 'inline_keyboard',
@@ -455,7 +473,7 @@ function buildContractText(request) {
 async function sendOwnerInterruptedNotice(request) {
   if (!request || !request.ownerId) return;
   const collected = [];
-  collected.push(`🔔 *Гость прервал оформление.*`);
+  collected.push(`🔔 *Гость прервал оформление.*\nЗаказ ID: ${getShortId(request.requestId)}`);
   collected.push(`Даты: ${request.dates.join(', ')}`);
   if (request.contractData.fullName) collected.push(`ФИО: ${request.contractData.fullName}`);
   if (request.contractData.passport) collected.push(`Паспорт: ${request.contractData.passport}`);
@@ -469,7 +487,7 @@ async function sendOwnerInterruptedNotice(request) {
 async function checkExpiredRequests() {
   const now = Date.now();
   for (let [id, request] of requests) {
-    if ((request.status === 'reserved' || request.status === 'contract_in_progress' || request.status === 'contract_sent' || request.status === 'contract_awaiting_signature') && request.reservationExpires && request.reservationExpires < now) {
+    if ((request.status === 'reserved' || request.status === 'contract_in_progress') && request.reservationExpires && request.reservationExpires < now) {
       console.log(`Заявка ${id} просрочена`);
       await sendOwnerInterruptedNotice(request);
       if (request.guestUserId) {
@@ -495,7 +513,7 @@ async function processContractStep(userId, text, attachments, request) {
   if (step === 'full_name') {
     if (!isValidFullName(text)) {
       await sendMessage(userId, 'Пожалуйста, введите полное ФИО в формате: Иванов Иван Иванович (два или три слова, только русские буквы).');
-      return; // остаёмся на шаге full_name
+      return;
     }
     request.contractData.fullName = text.trim();
     request.step = 'passport';
@@ -537,25 +555,28 @@ async function processContractStep(userId, text, attachments, request) {
     if (hasAttachment) {
       const imageAttachment = attachments.find(att => att.type === 'image') || attachments[0];
       request.contractData.selfie = imageAttachment.payload?.token || imageAttachment.payload?.url || 'received';
-      request.status = 'contract_sent';
-      request.step = null;
-      console.log(`Данные по заявке ${request.requestId} собраны, отправляем договор`);
-
+      // Рассчитываем цену
       const price = calculatePrice(request.dates, request.contractData.guestsCount);
       request.price = price;
+      request.status = 'awaiting_review';
+      request.step = 'awaiting_review';
+      console.log(`Заявка ${request.requestId} отправлена на проверку`);
 
-      const contractText = buildContractText(request);
-      await sendMessage(userId, contractText, getContractSignKeyboard(request.requestId));
-    } else {
-      await sendMessage(userId, 'Пожалуйста, отправьте фото (селфи с паспортом).');
-    }
-  } else if (step === 'awaiting_phrase') {
-    if (text && text.trim().length > 0) {
-      request.status = 'contract_signed';
-      request.step = null;
-      console.log(`Договор по заявке ${request.requestId} подписан гостем`);
+      // Гостю
+      await sendMessage(userId, 'Спасибо! Ваши данные отправлены на проверку. После проверки вам будет отправлен договор на подписание.');
 
-      // Отправляем селфи собственнику
+      // Владельцу: полная заявка с селфи
+      const ownerMsg = `🔔 *Новый заказ на проверку*\n` +
+        `Заказ ID: ${getShortId(request.requestId)}\n` +
+        `Даты: ${request.dates.join(', ')}\n` +
+        `ФИО: ${request.contractData.fullName}\n` +
+        `Паспорт: ${request.contractData.passport}\n` +
+        `Телефон: ${request.contractData.phone}\n` +
+        `Количество гостей: ${request.contractData.guestsCount}\n\n` +
+        `💰 *Стоимость:*\n${price.details}\n\n` +
+        `Итого: ${price.total} ₽`;
+
+      // Отправляем селфи отдельным сообщением (если есть)
       if (request.contractData.selfie && request.contractData.selfie !== 'received') {
         const selfieAttachment = [{
           type: 'image',
@@ -566,19 +587,28 @@ async function processContractStep(userId, text, attachments, request) {
         await sendMessage(request.ownerId, '📷 Селфи гостя с паспортом:', selfieAttachment, false);
       }
 
-      const ownerText = `🔔 Гость подписал договор.\n\n` +
+      await sendMessage(request.ownerId, ownerMsg, getOwnerReviewKeyboard(request.requestId, request.contractData.phone));
+    } else {
+      await sendMessage(userId, 'Пожалуйста, отправьте фото (селфи с паспортом).');
+    }
+  } else if (step === 'awaiting_review') {
+    await sendMessage(userId, 'Ваши данные на проверке. После проверки вам будет отправлен договор на подписание.');
+  } else if (step === 'awaiting_phrase') {
+    if (text && text.trim().length > 0) {
+      request.status = 'contract_signed';
+      request.step = null;
+      console.log(`Договор по заявке ${request.requestId} подписан гостем`);
+      const ownerMsg = `🔔 *Гость подписал договор.*\n` +
+        `Заказ ID: ${getShortId(request.requestId)}\n` +
         `Даты: ${request.dates.join(', ')}\n` +
         `ФИО: ${request.contractData.fullName}\n` +
         `Паспорт: ${request.contractData.passport}\n` +
         `Телефон: ${request.contractData.phone}\n` +
-        `Количество гостей: ${request.contractData.guestsCount}\n` +
-        `Базовая стоимость: ${request.price.baseTotal} ₽\n` +
-        `Скидка: ${request.price.discountTotal > 0 ? `-${request.price.discountTotal}₽` : '0₽'}\n` +
-        (request.price.thirdGuestTotal > 0 ? `Доплата за 3-го гостя: ${request.price.thirdGuestTotal} ₽\n` : '') +
-        `Депозит: ${request.price.deposit} ₽\n` +
+        `Количество гостей: ${request.contractData.guestsCount}\n\n` +
+        `💰 *Стоимость:*\n${request.price.details}\n\n` +
         `Сумма к оплате: ${request.price.total} ₽\n\n` +
         `Статус: ожидает оплаты`;
-      await sendMessage(request.ownerId, ownerText, getOwnerConfirmationKeyboard(request.requestId, request.dates.join(', ')));
+      await sendMessage(request.ownerId, ownerMsg, getOwnerConfirmationKeyboard(request.requestId, request.dates.join(', ')));
       await sendMessage(userId, '✅ Договор подписан! Ожидайте подтверждения оплаты от владельца.');
     } else {
       await sendMessage(userId, 'Пожалуйста, отправьте текст подтверждения.');
@@ -631,7 +661,7 @@ app.post('/callback', async (req, res) => {
 
       let activeContractRequest = null;
       for (let [id, req] of requests) {
-        if (req.guestUserId === userId && (req.status === 'contract_in_progress' || req.status === 'contract_awaiting_signature')) {
+        if (req.guestUserId === userId && (req.status === 'contract_in_progress' || req.status === 'awaiting_review' || req.status === 'contract_awaiting_signature')) {
           activeContractRequest = req;
           break;
         }
@@ -754,7 +784,7 @@ app.post('/callback', async (req, res) => {
           const price = calculatePrice(activeContractRequest.dates, guestsCount);
           activeContractRequest.price = price;
 
-          const priceText = `💰 *Стоимость бронирования:*\n${price.details}\n\nИтого: ${price.total} ₽\n\nТеперь отправьте селфи с паспортом в развернутом виде (фото).`;
+          const priceText = `💰 *Стоимость бронирования:*\n${price.details}\n\nИтого: ${price.total} ₽\n\nТеперь отправьте селфи с паспортом в развернутом виде (фото). После проверки Вам будет отправлен договор на подписание.`;
           await sendMessage(userId, priceText);
         } else {
           await sendMessage(userId, 'Не удалось определить заявку для выбора гостей.');
@@ -793,6 +823,35 @@ app.post('/callback', async (req, res) => {
         } else {
           await sendMessage(userId, 'Не удалось отменить резерв.');
         }
+      } else if (payload.startsWith('approve_contract_')) {
+        const requestId = payload.replace('approve_contract_', '');
+        const request = requests.get(requestId);
+        if (request && userId === request.ownerId && request.status === 'awaiting_review') {
+          request.status = 'contract_sent';
+          request.step = null;
+          console.log(`Договор по заявке ${requestId} отправлен гостю`);
+          const contractText = buildContractText(request);
+          await sendMessage(request.guestUserId, contractText, getContractSignKeyboard(requestId));
+          await sendMessage(userId, `✅ Договор по заказу ${getShortId(requestId)} отправлен гостю на подписание.`);
+        } else {
+          await sendMessage(userId, 'Не удалось отправить договор. Заявка не найдена или уже обработана.');
+        }
+      } else if (payload.startsWith('call_guest_')) {
+        const requestId = payload.replace('call_guest_', '');
+        const request = requests.get(requestId);
+        if (request && userId === request.ownerId) {
+          await sendMessage(userId, `📞 Телефон гостя: ${request.contractData.phone}\nНажмите, чтобы позвонить (или скопируйте номер).`);
+        } else {
+          await sendMessage(userId, 'Заявка не найдена.');
+        }
+      } else if (payload.startsWith('message_guest_')) {
+        const requestId = payload.replace('message_guest_', '');
+        const request = requests.get(requestId);
+        if (request && userId === request.ownerId) {
+          await sendMessage(userId, `💬 Напишите гостю в MAX (по ID пользователя ${request.guestUserId}) или по телефону: ${request.contractData.phone}`);
+        } else {
+          await sendMessage(userId, 'Заявка не найдена.');
+        }
       } else if (payload.startsWith('sign_contract_')) {
         const requestId = payload.replace('sign_contract_', '');
         const request = requests.get(requestId);
@@ -825,20 +884,50 @@ app.post('/callback', async (req, res) => {
           const datesStr = request.dates.join(', ');
           const key = `KEY-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
           await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на даты ${datesStr} подтверждена.\n\nВаш электронный ключ: ${key}\n\nСмотри кино. Спи крепко.`);
-          requests.delete(requestId);
+
+          // Карточка заказа владельцу
+          const cardText = `📇 *Карточка заказа*\n` +
+            `Заказ ID: ${getShortId(requestId)}\n` +
+            `Статус: ✅ Оплачен\n` +
+            `Даты: ${request.dates.join(', ')}\n` +
+            `ФИО: ${request.contractData.fullName}\n` +
+            `Паспорт: ${request.contractData.passport}\n` +
+            `Телефон: ${request.contractData.phone}\n` +
+            `Количество гостей: ${request.contractData.guestsCount}\n\n` +
+            `💰 *Экономические показатели:*\n` +
+            `Базовая стоимость: ${request.price.baseTotal} ₽\n` +
+            `Скидка: ${request.price.discountTotal > 0 ? `-${request.price.discountTotal}₽` : '0₽'}\n` +
+            (request.price.thirdGuestTotal > 0 ? `Доплата за 3-го гостя: ${request.price.thirdGuestTotal} ₽\n` : '') +
+            `Депозит: ${request.price.deposit} ₽\n` +
+            `Итого оплачено: ${request.price.total} ₽`;
+
+          // Отправляем селфи (если есть) отдельным сообщением
+          if (request.contractData.selfie && request.contractData.selfie !== 'received') {
+            const selfieAttachment = [{
+              type: 'image',
+              payload: {
+                token: request.contractData.selfie
+              }
+            }];
+            await sendMessage(request.ownerId, '📷 Селфи гостя с паспортом:', selfieAttachment, false);
+          }
+
+          await sendMessage(request.ownerId, cardText);
+
+          // Не удаляем заявку, оставляем в памяти (для будущего архива)
         } else {
           await sendMessage(userId, 'Заявка не найдена или её статус не позволяет подтвердить оплату.');
         }
       } else if (payload.startsWith('owner_cancel_')) {
         const requestId = payload.replace('owner_cancel_', '');
         const request = requests.get(requestId);
-        if (request && userId === request.ownerId) {
+        if (request && userId === request.ownerId && request.status !== 'paid') {
           request.status = 'cancelled';
           console.log(`Заявка ${requestId} отменена владельцем`);
           await sendMessage(request.guestUserId, `К сожалению, бронь на даты ${request.dates.join(', ')} отменена владельцем.`);
           requests.delete(requestId);
         } else {
-          await sendMessage(userId, 'Заявка не найдена.');
+          await sendMessage(userId, 'Заявка не найдена или уже оплачена/отменена.');
         }
       } else {
         console.log('Неизвестный payload:', payload);
