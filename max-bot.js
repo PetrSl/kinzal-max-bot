@@ -318,17 +318,13 @@ function getReservationKeyboard(requestId) {
 }
 
 function getOwnerReviewKeyboard(request) {
-  const phone = request.contractData.phone.replace(/\D/g, '');
-  const telUrl = `tel:+${phone}`;
-  const maxUserUrl = `max://user/${request.guestUserId}`;
-
   return [{
     type: 'inline_keyboard',
     payload: {
       buttons: [
         [{ type: 'callback', text: '✅ Отправить договор', payload: `approve_contract_${request.requestId}` }],
-        [{ type: 'link', text: '📞 Позвонить', url: telUrl }],
-        [{ type: 'link', text: '💬 Написать', url: maxUserUrl }],
+        [{ type: 'callback', text: '📞 Позвонить', payload: `call_guest_${request.requestId}` }],
+        [{ type: 'callback', text: '💬 Написать', payload: `message_guest_${request.requestId}` }],
         [{ type: 'callback', text: '❌ Отменить бронь', payload: `owner_cancel_${request.requestId}` }]
       ]
     }
