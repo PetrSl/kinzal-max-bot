@@ -259,6 +259,7 @@ function getRulesText() {
   return '⚠️ *Важно знать:*\n' +
     '• Только для граждан РФ\n' +
     '• Возраст от 21 года\n' +
+    '• В бронировании может быть отказано на любом этапе оформления договора без объяснения причин\n' +
     '• Правила проживания:\n' +
     '  - не курить, не шуметь после 22:00\n' +
     '  - не проводить вечеринки\n' +
@@ -316,15 +317,19 @@ function getReservationKeyboard(requestId) {
   }];
 }
 
-function getOwnerReviewKeyboard(requestId) {
+function getOwnerReviewKeyboard(request) {
+  const phone = request.contractData.phone.replace(/\D/g, '');
+  const telUrl = `tel:+${phone}`;
+  const maxUserUrl = `max://user/${request.guestUserId}`;
+
   return [{
     type: 'inline_keyboard',
     payload: {
       buttons: [
-        [{ type: 'callback', text: '✅ Отправить договор', payload: `approve_contract_${requestId}` }],
-        [{ type: 'callback', text: '📞 Позвонить', payload: `call_guest_${requestId}` }],
-        [{ type: 'callback', text: '💬 Написать', payload: `message_guest_${requestId}` }],
-        [{ type: 'callback', text: '❌ Отменить бронь', payload: `owner_cancel_${requestId}` }]
+        [{ type: 'callback', text: '✅ Отправить договор', payload: `approve_contract_${request.requestId}` }],
+        [{ type: 'link', text: '📞 Позвонить', url: telUrl }],
+        [{ type: 'link', text: '💬 Написать', url: maxUserUrl }],
+        [{ type: 'callback', text: '❌ Отменить бронь', payload: `owner_cancel_${request.requestId}` }]
       ]
     }
   }];
@@ -593,7 +598,7 @@ async function processContractStep(userId, text, attachments, request) {
 
       // Отправляем селфи отдельным сообщением (используем функцию)
       await sendSelfieToOwner(request);
-      await sendMessage(request.ownerId, ownerMsg, getOwnerReviewKeyboard(request.requestId));
+      await sendMessage(request.ownerId, ownerMsg, getOwnerReviewKeyboard(request));
     } else {
       await sendMessage(userId, 'Пожалуйста, отправьте фото (селфи с паспортом).');
     }
