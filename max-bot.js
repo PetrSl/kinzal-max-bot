@@ -184,6 +184,22 @@ async function sendMessage(userId, text, attachments = [], useMarkdown = true) {
 }
 // =======================================
 
+// Отправка селфи владельцу (с учётом типа вложения)
+async function sendSelfieToOwner(request) {
+  if (!request.contractData.selfie || request.contractData.selfie === 'received') return;
+  const selfieType = request.contractData.selfieType || 'image';
+  const payload = {};
+  if (request.contractData.selfie.startsWith('http')) {
+    payload.url = request.contractData.selfie;
+  } else {
+    payload.token = request.contractData.selfie;
+  }
+  await sendMessage(request.ownerId, '📷 Селфи гостя с паспортом:', [{
+    type: selfieType,
+    payload: payload
+  }], false);
+}
+
 async function sendBusyDates(userId) {
   const busy = await getBusyDates();
   if (busy.length === 0) {
@@ -300,7 +316,7 @@ function getReservationKeyboard(requestId) {
   }];
 }
 
-function getOwnerReviewKeyboard(requestId, guestPhone) {
+function getOwnerReviewKeyboard(requestId) {
   return [{
     type: 'inline_keyboard',
     payload: {
@@ -378,7 +394,8 @@ async function sendWelcome(userId) {
   const text = 'Привет! Я бот Кинозала 4K. 👋\n\n' +
                '⚠️ *Важно знать:*\n' +
                '• Только для граждан РФ\n' +
-               '• Возраст от 21 года\n\n' +
+               '• Возраст от 21 года\n' +
+               '• В бронировании может быть отказано на любом этапе оформления договора без объяснения причин\n\n' +
                'Выберите действие ниже или напишите мне любое сообщение — я сразу открою меню.';
   await sendMessage(userId, text, getMainKeyboard());
 }
@@ -401,7 +418,7 @@ async function setCommands() {
   }
 }
 
-// ===== НОВАЯ ФУНКЦИЯ: Валидация ФИО =====
+// Валидация ФИО
 function isValidFullName(input) {
   const trimmed = input.trim();
   const parts = trimmed.split(/\s+/);
@@ -409,7 +426,6 @@ function isValidFullName(input) {
   const re = /^[А-ЯЁ][а-яё]+(-[А-ЯЁ][а-яё]+)?$/;
   return parts.every(part => re.test(part));
 }
-// ===========================================
 
 function normalizePhone(phone) {
   let digits = phone.replace(/\D/g, '');
@@ -555,17 +571,16 @@ async function processContractStep(userId, text, attachments, request) {
     if (hasAttachment) {
       const imageAttachment = attachments.find(att => att.type === 'image') || attachments[0];
       request.contractData.selfie = imageAttachment.payload?.token || imageAttachment.payload?.url || 'received';
-      // Рассчитываем цену
+      request.contractData.selfieType = imageAttachment.type;
       const price = calculatePrice(request.dates, request.contractData.guestsCount);
       request.price = price;
       request.status = 'awaiting_review';
       request.step = 'awaiting_review';
       console.log(`Заявка ${request.requestId} отправлена на проверку`);
 
-      // Гостю
       await sendMessage(userId, 'Спасибо! Ваши данные отправлены на проверку. После проверки вам будет отправлен договор на подписание.');
 
-      // Владельцу: полная заявка с селфи
+      // Владельцу: полная заявка
       const ownerMsg = `🔔 *Новый заказ на проверку*\n` +
         `Заказ ID: ${getShortId(request.requestId)}\n` +
         `Даты: ${request.dates.join(', ')}\n` +
@@ -576,18 +591,9 @@ async function processContractStep(userId, text, attachments, request) {
         `💰 *Стоимость:*\n${price.details}\n\n` +
         `Итого: ${price.total} ₽`;
 
-      // Отправляем селфи отдельным сообщением (если есть)
-      if (request.contractData.selfie && request.contractData.selfie !== 'received') {
-        const selfieAttachment = [{
-          type: 'image',
-          payload: {
-            token: request.contractData.selfie
-          }
-        }];
-        await sendMessage(request.ownerId, '📷 Селфи гостя с паспортом:', selfieAttachment, false);
-      }
-
-      await sendMessage(request.ownerId, ownerMsg, getOwnerReviewKeyboard(request.requestId, request.contractData.phone));
+      // Отправляем селфи отдельным сообщением (используем функцию)
+      await sendSelfieToOwner(request);
+      await sendMessage(request.ownerId, ownerMsg, getOwnerReviewKeyboard(request.requestId));
     } else {
       await sendMessage(userId, 'Пожалуйста, отправьте фото (селфи с паспортом).');
     }
@@ -608,6 +614,8 @@ async function processContractStep(userId, text, attachments, request) {
         `💰 *Стоимость:*\n${request.price.details}\n\n` +
         `Сумма к оплате: ${request.price.total} ₽\n\n` +
         `Статус: ожидает оплаты`;
+      // Отправляем селфи отдельно
+      await sendSelfieToOwner(request);
       await sendMessage(request.ownerId, ownerMsg, getOwnerConfirmationKeyboard(request.requestId, request.dates.join(', ')));
       await sendMessage(userId, '✅ Договор подписан! Ожидайте подтверждения оплаты от владельца.');
     } else {
@@ -794,7 +802,7 @@ app.post('/callback', async (req, res) => {
         const request = requests.get(requestId);
         if (request && request.status === 'pending_confirmation' && request.guestUserId === userId) {
           request.status = 'reserved';
-          request.reservationExpires = Date.now() + 60 * 60 * 1000; // 60 минут
+          request.reservationExpires = Date.now() + 60 * 60 * 1000;
           console.log(`Заявка ${requestId} переведена в статус reserved`);
           const datesStr = request.dates.join(', ');
           await sendMessage(userId, `✅ Дата(ы) ${datesStr} зарезервированы на 60 минут. Пожалуйста, оформите договор и оплатите за это время.`, getReservationKeyboard(requestId));
@@ -840,7 +848,7 @@ app.post('/callback', async (req, res) => {
         const requestId = payload.replace('call_guest_', '');
         const request = requests.get(requestId);
         if (request && userId === request.ownerId) {
-          await sendMessage(userId, `📞 Телефон гостя: ${request.contractData.phone}\nНажмите, чтобы позвонить (или скопируйте номер).`);
+          await sendMessage(userId, `📞 Телефон гостя: ${request.contractData.phone}`);
         } else {
           await sendMessage(userId, 'Заявка не найдена.');
         }
@@ -885,7 +893,7 @@ app.post('/callback', async (req, res) => {
           const key = `KEY-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
           await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на даты ${datesStr} подтверждена.\n\nВаш электронный ключ: ${key}\n\nСмотри кино. Спи крепко.`);
 
-          // Карточка заказа владельцу
+          // Карточка заказа
           const cardText = `📇 *Карточка заказа*\n` +
             `Заказ ID: ${getShortId(requestId)}\n` +
             `Статус: ✅ Оплачен\n` +
@@ -901,20 +909,9 @@ app.post('/callback', async (req, res) => {
             `Депозит: ${request.price.deposit} ₽\n` +
             `Итого оплачено: ${request.price.total} ₽`;
 
-          // Отправляем селфи (если есть) отдельным сообщением
-          if (request.contractData.selfie && request.contractData.selfie !== 'received') {
-            const selfieAttachment = [{
-              type: 'image',
-              payload: {
-                token: request.contractData.selfie
-              }
-            }];
-            await sendMessage(request.ownerId, '📷 Селфи гостя с паспортом:', selfieAttachment, false);
-          }
-
+          // Селфи отдельно
+          await sendSelfieToOwner(request);
           await sendMessage(request.ownerId, cardText);
-
-          // Не удаляем заявку, оставляем в памяти (для будущего архива)
         } else {
           await sendMessage(userId, 'Заявка не найдена или её статус не позволяет подтвердить оплату.');
         }
