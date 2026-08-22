@@ -44,7 +44,35 @@ try {
   console.warn('pricing.json не найден, используются цены по умолчанию');
 }
 
+// ==== Файл для хранения заявок ====
+const REQUESTS_FILE = './active_requests.json';
+
+// Загружаем заявки из файла при старте
 const requests = new Map();
+try {
+  if (fs.existsSync(REQUESTS_FILE)) {
+    const data = JSON.parse(fs.readFileSync(REQUESTS_FILE, 'utf8'));
+    for (const [key, value] of Object.entries(data)) {
+      requests.set(key, value);
+    }
+    console.log(`Загружено ${requests.size} заявок из ${REQUESTS_FILE}`);
+  } else {
+    console.log('Файл active_requests.json не найден, начинаем с пустого списка');
+  }
+} catch (e) {
+  console.error('Ошибка загрузки active_requests.json:', e);
+}
+
+// Функция сохранения заявок в файл
+function saveRequests() {
+  try {
+    const obj = Object.fromEntries(requests);
+    fs.writeFileSync(REQUESTS_FILE, JSON.stringify(obj, null, 2), 'utf8');
+    console.log('Заявки сохранены в active_requests.json');
+  } catch (e) {
+    console.error('Ошибка сохранения заявок:', e);
+  }
+}
 
 function generateRequestId(userId) {
   return `${Date.now()}_${userId}`;
@@ -511,6 +539,7 @@ async function checkExpiredRequests() {
         await sendMessage(request.guestUserId, 'Время резерва истекло. Бронь отменена.');
       }
       requests.delete(id);
+      saveRequests();
     }
   }
 }
@@ -522,6 +551,7 @@ async function processContractStep(userId, text, attachments, request) {
     await sendOwnerInterruptedNotice(request);
     await sendMessage(userId, 'Резерв отменён. Даты освобождены.');
     requests.delete(request.requestId);
+    saveRequests();
     return;
   }
 
@@ -535,6 +565,7 @@ async function processContractStep(userId, text, attachments, request) {
     request.contractData.fullName = text.trim();
     request.step = 'passport';
     await sendMessage(userId, 'Спасибо! Теперь укажите серию и номер паспорта (например, 4510 123456):');
+    saveRequests();
   } else if (step === 'passport') {
     if (!isValidPassport(text)) {
       await sendMessage(userId, 'Неверный формат паспорта. Введите 10 цифр: 4 цифры серия и 6 цифр номер (можно с пробелами или дефисами).');
@@ -543,6 +574,7 @@ async function processContractStep(userId, text, attachments, request) {
     request.contractData.passport = text.trim();
     request.step = 'phone';
     await sendMessage(userId, 'Укажите номер телефона (можно с +7, 8 или просто 10 цифр):');
+    saveRequests();
   } else if (step === 'phone') {
     const normalized = normalizePhone(text);
     if (!normalized) {
@@ -553,6 +585,7 @@ async function processContractStep(userId, text, attachments, request) {
     request.smsCode = '1234';
     request.step = 'sms_code';
     await sendMessage(userId, `На номер ${normalized} отправлен SMS-код (заглушка: ${request.smsCode}). Введите код:`);
+    saveRequests();
   } else if (step === 'sms_code') {
     const code = text.trim();
     if (!/^\d+$/.test(code)) {
@@ -562,6 +595,7 @@ async function processContractStep(userId, text, attachments, request) {
     if (code === request.smsCode) {
       request.step = 'guests_count';
       await sendMessage(userId, 'Сколько гостей будет проживать?', getGuestsKeyboard());
+      saveRequests();
     } else {
       await sendMessage(userId, 'Неверный код, попробуйте ещё раз:');
     }
@@ -581,7 +615,6 @@ async function processContractStep(userId, text, attachments, request) {
 
       await sendMessage(userId, 'Спасибо! Ваши данные отправлены на проверку. После проверки вам будет отправлен договор на подписание.');
 
-      // Владельцу: полная заявка
       const ownerMsg = `🔔 *Новый заказ на проверку*\n` +
         `Заказ ID: ${getShortId(request.requestId)}\n` +
         `Даты: ${request.dates.join(', ')}\n` +
@@ -592,9 +625,9 @@ async function processContractStep(userId, text, attachments, request) {
         `💰 *Стоимость:*\n${price.details}\n\n` +
         `Итого: ${price.total} ₽`;
 
-      // Отправляем селфи отдельным сообщением (используем функцию)
       await sendSelfieToOwner(request);
       await sendMessage(request.ownerId, ownerMsg, getOwnerReviewKeyboard(request));
+      saveRequests();
     } else {
       await sendMessage(userId, 'Пожалуйста, отправьте фото (селфи с паспортом).');
     }
@@ -615,10 +648,10 @@ async function processContractStep(userId, text, attachments, request) {
         `💰 *Стоимость:*\n${request.price.details}\n\n` +
         `Сумма к оплате: ${request.price.total} ₽\n\n` +
         `Статус: ожидает оплаты`;
-      // Отправляем селфи отдельно
       await sendSelfieToOwner(request);
       await sendMessage(request.ownerId, ownerMsg, getOwnerConfirmationKeyboard(request.requestId, request.dates.join(', ')));
       await sendMessage(userId, '✅ Договор подписан! Ожидайте подтверждения оплаты от владельца.');
+      saveRequests();
     } else {
       await sendMessage(userId, 'Пожалуйста, отправьте текст подтверждения.');
     }
@@ -696,6 +729,7 @@ app.post('/callback', async (req, res) => {
           } else {
             activeSelectingRequest.dates.push(text);
             await sendMessage(userId, `Дата ${text} добавлена. Добавить ещё дату?`, getAddDateKeyboard());
+            saveRequests();
           }
         } else {
           const requestId = generateRequestId(userId);
@@ -711,6 +745,7 @@ app.post('/callback', async (req, res) => {
           };
           requests.set(requestId, request);
           await sendMessage(userId, `Вы выбрали дату: ${text}. Добавить ещё дату?`, getAddDateKeyboard());
+          saveRequests();
         }
       } else if (updateType === 'bot_started' || text.startsWith('/start')) {
         await sendWelcome(userId);
@@ -774,6 +809,7 @@ app.post('/callback', async (req, res) => {
           activeSelectingRequest.status = 'pending_confirmation';
           const datesStr = activeSelectingRequest.dates.join(', ');
           await sendMessage(userId, `Вы выбрали даты: ${datesStr}. Подтвердите бронь:`, getConfirmationKeyboard(activeSelectingRequest.requestId));
+          saveRequests();
         } else {
           await sendMessage(userId, 'Нет выбранных дат. Начните выбор заново.', getMainKeyboard());
         }
@@ -803,6 +839,7 @@ app.post('/callback', async (req, res) => {
             }
           }];
           await sendMessage(userId, priceText, selfieCancelKeyboard);
+          saveRequests();
         } else {
           await sendMessage(userId, 'Не удалось определить заявку для выбора гостей.');
         }
@@ -815,6 +852,7 @@ app.post('/callback', async (req, res) => {
           console.log(`Заявка ${requestId} переведена в статус reserved`);
           const datesStr = request.dates.join(', ');
           await sendMessage(userId, `✅ Дата(ы) ${datesStr} зарезервированы на 60 минут. Пожалуйста, оформите договор и оплатите за это время.`, getReservationKeyboard(requestId));
+          saveRequests();
         } else {
           await sendMessage(userId, 'Заявка не найдена или уже обработана.');
         }
@@ -825,6 +863,7 @@ app.post('/callback', async (req, res) => {
           request.status = 'contract_in_progress';
           request.step = 'full_name';
           await sendMessage(userId, 'Для оформления договора, пожалуйста, укажите ваше полное ФИО (например, Иванов Иван Иванович):');
+          saveRequests();
         } else {
           await sendMessage(userId, 'Резерв не найден или уже истёк.');
         }
@@ -837,6 +876,7 @@ app.post('/callback', async (req, res) => {
           await sendOwnerInterruptedNotice(request);
           await sendMessage(userId, 'Резерв отменён. Даты освобождены.');
           requests.delete(requestId);
+          saveRequests();
         } else {
           await sendMessage(userId, 'Не удалось отменить резерв.');
         }
@@ -850,6 +890,7 @@ app.post('/callback', async (req, res) => {
           const contractText = buildContractText(request);
           await sendMessage(request.guestUserId, contractText, getContractSignKeyboard(requestId));
           await sendMessage(userId, `✅ Договор по заказу ${getShortId(requestId)} отправлен гостю на подписание.`);
+          saveRequests();
         } else {
           await sendMessage(userId, 'Не удалось отправить договор. Заявка не найдена или уже обработана.');
         }
@@ -877,6 +918,7 @@ app.post('/callback', async (req, res) => {
           request.step = 'awaiting_phrase';
           const phrase = `${request.contractData.fullName}, паспорт ${request.contractData.passport}, даты проживания ${request.dates.join(', ')}, с условиями договора краткосрочного найма ознакомлен и согласен. Оплату произвёл. Скан договора со своей подписью обязуюсь предоставить.`;
           await sendMessage(userId, `Для завершения подписания отправьте мне сообщение:\n\n"${phrase}"`, getClipboardKeyboard(phrase));
+          saveRequests();
         } else {
           await sendMessage(userId, 'Не удалось подписать договор. Заявка не найдена или уже обработана.');
         }
@@ -889,6 +931,7 @@ app.post('/callback', async (req, res) => {
           await sendOwnerInterruptedNotice(request);
           await sendMessage(userId, 'Договор отклонён. Резерв отменён.');
           requests.delete(requestId);
+          saveRequests();
         } else {
           await sendMessage(userId, 'Не удалось отклонить договор.');
         }
@@ -902,7 +945,6 @@ app.post('/callback', async (req, res) => {
           const key = `KEY-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
           await sendMessage(request.guestUserId, `✅ Оплата получена! Бронь на даты ${datesStr} подтверждена.\n\nВаш электронный ключ: ${key}\n\nПриятного просмотра!`);
 
-          // Карточка заказа
           const cardText = `📇 *Карточка заказа*\n` +
             `Заказ ID: ${getShortId(requestId)}\n` +
             `Статус: ✅ Оплачен\n` +
@@ -918,9 +960,9 @@ app.post('/callback', async (req, res) => {
             `Депозит: ${request.price.deposit} ₽\n` +
             `Итого оплачено: ${request.price.total} ₽`;
 
-          // Селфи отдельно
           await sendSelfieToOwner(request);
           await sendMessage(request.ownerId, cardText);
+          saveRequests();
         } else {
           await sendMessage(userId, 'Заявка не найдена или её статус не позволяет подтвердить оплату.');
         }
@@ -932,6 +974,7 @@ app.post('/callback', async (req, res) => {
           console.log(`Заявка ${requestId} отменена владельцем`);
           await sendMessage(request.guestUserId, `К сожалению, бронь на даты ${request.dates.join(', ')} отменена владельцем.`);
           requests.delete(requestId);
+          saveRequests();
         } else {
           await sendMessage(userId, 'Заявка не найдена или уже оплачена/отменена.');
         }
