@@ -383,6 +383,16 @@ async function setCommands() {
   }
 }
 
+// ===== НОВАЯ ФУНКЦИЯ: Валидация ФИО =====
+function isValidFullName(input) {
+  const trimmed = input.trim();
+  const parts = trimmed.split(/\s+/);
+  if (parts.length < 2 || parts.length > 3) return false;
+  const re = /^[А-ЯЁ][а-яё]+(-[А-ЯЁ][а-яё]+)?$/;
+  return parts.every(part => re.test(part));
+}
+// ===========================================
+
 function normalizePhone(phone) {
   let digits = phone.replace(/\D/g, '');
   if (digits.startsWith('8')) digits = '7' + digits.slice(1);
@@ -483,6 +493,10 @@ async function processContractStep(userId, text, attachments, request) {
   const step = request.step;
 
   if (step === 'full_name') {
+    if (!isValidFullName(text)) {
+      await sendMessage(userId, 'Пожалуйста, введите полное ФИО в формате: Иванов Иван Иванович (два или три слова, только русские буквы).');
+      return; // остаёмся на шаге full_name
+    }
     request.contractData.fullName = text.trim();
     request.step = 'passport';
     await sendMessage(userId, 'Спасибо! Теперь укажите серию и номер паспорта (например, 4510 123456):');
@@ -540,6 +554,18 @@ async function processContractStep(userId, text, attachments, request) {
       request.status = 'contract_signed';
       request.step = null;
       console.log(`Договор по заявке ${request.requestId} подписан гостем`);
+
+      // Отправляем селфи собственнику
+      if (request.contractData.selfie && request.contractData.selfie !== 'received') {
+        const selfieAttachment = [{
+          type: 'image',
+          payload: {
+            token: request.contractData.selfie
+          }
+        }];
+        await sendMessage(request.ownerId, '📷 Селфи гостя с паспортом:', selfieAttachment, false);
+      }
+
       const ownerText = `🔔 Гость подписал договор.\n\n` +
         `Даты: ${request.dates.join(', ')}\n` +
         `ФИО: ${request.contractData.fullName}\n` +
@@ -774,7 +800,6 @@ app.post('/callback', async (req, res) => {
           request.status = 'contract_awaiting_signature';
           request.step = 'awaiting_phrase';
           const phrase = `${request.contractData.fullName}, паспорт ${request.contractData.passport}, даты проживания ${request.dates.join(', ')}, с условиями договора краткосрочного найма ознакомлен и согласен. Оплату произвёл. Скан договора со своей подписью обязуюсь предоставить.`;
-          // Отправляем сообщение с фразой и кнопкой копирования
           await sendMessage(userId, `Для завершения подписания отправьте мне сообщение:\n\n"${phrase}"`, getClipboardKeyboard(phrase));
         } else {
           await sendMessage(userId, 'Не удалось подписать договор. Заявка не найдена или уже обработана.');
